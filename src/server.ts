@@ -7,6 +7,7 @@ import { CryptoService } from "@/auth/crypto";
 import { ProviderService } from "@/providers";
 import { ProviderProxy, ProxyError } from "@/providers/proxy";
 import { RateLimitGuard } from "@/providers/rate-limiter";
+import { ModelMetadataSync } from "@/providers/model-sync";
 import { FusionService } from "@/fusion";
 import { classifyRequest, estimateTokens } from "@/router/classify";
 import { resolveTierModel, getFallbackChain, type ResolvedModel } from "@/router/resolve";
@@ -20,6 +21,7 @@ export class TokenPoolServer {
   private proxy: ProviderProxy;
   private guard: RateLimitGuard;
   private fusion: FusionService;
+  private modelSync: ModelMetadataSync;
   private config: AppConfig;
 
   constructor() {
@@ -32,6 +34,7 @@ export class TokenPoolServer {
     this.proxy = new ProviderProxy(this.providers, this.crypto);
     this.guard = new RateLimitGuard(this.db, this.providers);
     this.fusion = new FusionService(this.db);
+    this.modelSync = new ModelMetadataSync(this.providers, this.config.modelsRefreshIntervalSec);
 
     this.fastify = Fastify({ logger: true });
   }
@@ -46,6 +49,7 @@ export class TokenPoolServer {
   async start() {
     await this.registerPlugins();
     this.registerRoutes();
+    this.modelSync.start();
 
     try {
       await this.fastify.listen({ port: this.config.port, host: this.config.host });
@@ -376,6 +380,17 @@ export class TokenPoolServer {
       return { ok: true };
     });
 
+    // Models
+    this.fastify.get("/v1/admin/models", async (request) => {
+      const providerId = (request.query as any)?.providerId ? parseInt((request.query as any).providerId, 10) : undefined;
+      return this.providers.listModels(providerId);
+    });
+
+    this.fastify.post("/v1/admin/models/sync", async () => {
+      const result = await this.modelSync.sync();
+      return result;
+    });
+
     // Stats
     this.fastify.get("/v1/admin/stats", async () => {
       const total = this.db.prepare(
@@ -408,6 +423,7 @@ export class TokenPoolServer {
   }
 
   async stop() {
+    this.modelSync.stop();
     await this.fastify.close();
     this.db.close();
   }

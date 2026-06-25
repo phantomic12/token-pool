@@ -1,4 +1,4 @@
-import { hashSync, genSaltSync, compareSync } from "bcryptjs";
+import bcrypt from "bcryptjs";
 import type { DatabaseService } from "@/db";
 import type { User, AuthUser } from "@/types";
 
@@ -24,8 +24,8 @@ export class UserService {
   constructor(private db: DatabaseService) {}
 
   create(username: string, password: string, role: "admin" | "regular" = "regular"): number {
-    const salt = genSaltSync(10);
-    const passwordHash = hashSync(password, salt);
+    const salt = bcrypt.genSaltSync(10);
+    const passwordHash = bcrypt.hashSync(password, salt);
     const result = this.db.prepare(
       "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)"
     ).run(username, passwordHash, role);
@@ -55,7 +55,7 @@ export class UserService {
   verifyPassword(username: string, password: string): AuthUser | null {
     const user = this.getByUsername(username);
     if (!user) return null;
-    if (!compareSync(password, user.passwordHash)) return null;
+    if (!bcrypt.compareSync(password, user.passwordHash)) return null;
     return user;
   }
 

@@ -3,7 +3,11 @@ import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import { randomBytes } from "crypto";
 import { existsSync } from "fs";
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 import { loadConfig, type AppConfig } from "@/config";
 import { DatabaseService } from "@/db";
 import { CryptoService } from "@/auth/crypto";

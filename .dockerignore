@@ -11,4 +11,3 @@ data
 .gitignore
 .env
 tests
-web/src

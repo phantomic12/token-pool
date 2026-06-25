@@ -11,6 +11,7 @@ import { ModelMetadataSync } from "@/providers/model-sync";
 import { FusionService } from "@/fusion";
 import { UserService } from "@/auth/user-service";
 import { registerAuth, setupAuthGuards, signToken, type JwtPayload } from "@/auth/middleware";
+import { UsageTracker } from "@/stats";
 import { classifyRequest, estimateTokens } from "@/router/classify";
 import { resolveTierModel, getFallbackChain, type ResolvedModel } from "@/router/resolve";
 import type { ChatCompletionRequest, ChatCompletionResponse } from "@/types";
@@ -25,6 +26,7 @@ export class TokenPoolServer {
   private fusion: FusionService;
   private modelSync: ModelMetadataSync;
   private users: UserService;
+  private usage: UsageTracker;
   private config: AppConfig;
 
   constructor() {
@@ -39,6 +41,7 @@ export class TokenPoolServer {
     this.fusion = new FusionService(this.db);
     this.modelSync = new ModelMetadataSync(this.providers, this.config.modelsRefreshIntervalSec);
     this.users = new UserService(this.db);
+    this.usage = new UsageTracker(this.db);
 
     this.fastify = Fastify({ logger: true });
   }
@@ -165,7 +168,7 @@ export class TokenPoolServer {
       // Try each model in the fallback chain
       for (const resolved of chain) {
         try {
-          return await this.handleProxy(body, resolved, reply);
+          return await this.handleProxy(body, resolved, reply, classification.tier);
         } catch (err: any) {
           // On 429, mark the key as backed off and try next
           if (err instanceof ProxyError && err.statusCode === 429) {
@@ -226,10 +229,17 @@ export class TokenPoolServer {
       key: decision.key,
     };
 
-    return await this.handleProxy(body, resolved, reply);
+    return await this.handleProxy(body, resolved, reply, "direct");
   }
 
-  private async handleProxy(body: ChatCompletionRequest, resolved: ResolvedModel, reply: any) {
+  private async handleProxy(
+    body: ChatCompletionRequest,
+    resolved: ResolvedModel,
+    reply: any,
+    tierLabel: string = "standard",
+    userId: number = 1, // default user until auth on /v1/chat/completions
+  ) {
+    const startTime = Date.now();
     const result = await this.proxy.forward(resolved.provider, resolved.modelId, body, resolved.key);
 
     if (result.status === 429) {
@@ -258,18 +268,33 @@ export class TokenPoolServer {
 
       const reader = (result.body as ReadableStream<Uint8Array>).getReader();
       const writer = reply.raw;
+      let outputTokens = 0;
 
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           writer.write(Buffer.from(value));
+          // Try to count tokens from SSE chunks
+          outputTokens += countStreamTokens(value);
         }
       } catch (err) {
         this.fastify.log.error({ err }, "Stream error");
       } finally {
         writer.end();
       }
+
+      // Record usage (input estimate, output from stream count)
+      this.usage.record({
+        userId,
+        providerId: resolved.provider.id,
+        modelId: resolved.modelId,
+        tier: tierLabel as any,
+        inputTokens: estimateTokens(body),
+        outputTokens,
+        latencyMs: Date.now() - startTime,
+      });
+
       return reply;
     }
 
@@ -280,6 +305,19 @@ export class TokenPoolServer {
 
     const data = JSON.parse(text);
     reply.header("x-resolved-model", resolved.modelId);
+
+    // Record usage from response
+    const usage = (data as any)?.usage;
+    this.usage.record({
+      userId,
+      providerId: resolved.provider.id,
+      modelId: resolved.modelId,
+      tier: tierLabel as any,
+      inputTokens: usage?.prompt_tokens ?? estimateTokens(body),
+      outputTokens: usage?.completion_tokens ?? 0,
+      latencyMs: Date.now() - startTime,
+    });
+
     return reply.send(data);
   }
 
@@ -439,33 +477,29 @@ export class TokenPoolServer {
     });
 
     // Stats
-    this.fastify.get("/v1/admin/stats", adminGuard, async () => {
-      const total = this.db.prepare(
-        "SELECT COUNT(*) as count, COALESCE(SUM(input_tokens), 0) as input_tokens, COALESCE(SUM(output_tokens), 0) as output_tokens FROM usage_events"
-      ).get();
-      const byProvider = this.db.prepare(
-        `SELECT provider_id, COUNT(*) as count, SUM(input_tokens) as input_tokens, SUM(output_tokens) as output_tokens
-         FROM usage_events GROUP BY provider_id ORDER BY count DESC`
-      ).all();
-      const byTier = this.db.prepare(
-        `SELECT tier, COUNT(*) as count, SUM(input_tokens) as input_tokens, SUM(output_tokens) as output_tokens
-         FROM usage_events GROUP BY tier ORDER BY count DESC`
-      ).all();
-      return { total, byProvider, byTier };
+    this.fastify.get("/v1/admin/stats", adminGuard, async (request) => {
+      const days = parseInt((request.query as any)?.days ?? "30", 10);
+      return this.usage.getSummary(days);
     });
 
-    this.fastify.get("/v1/admin/stats/users", adminGuard, async () => {
-      return this.db.prepare(
-        `SELECT user_id, COUNT(*) as count, SUM(input_tokens) as input_tokens, SUM(output_tokens) as output_tokens
-         FROM usage_events GROUP BY user_id ORDER BY count DESC`
-      ).all();
+    this.fastify.get("/v1/admin/stats/users", adminGuard, async (request) => {
+      const days = parseInt((request.query as any)?.days ?? "30", 10);
+      const summary = this.usage.getSummary(days);
+      return summary.byUser;
     });
 
-    this.fastify.get("/v1/admin/stats/providers", adminGuard, async () => {
-      return this.db.prepare(
-        `SELECT provider_id, COUNT(*) as count, SUM(input_tokens) as input_tokens, SUM(output_tokens) as output_tokens
-         FROM usage_events GROUP BY provider_id ORDER BY count DESC`
-      ).all();
+    this.fastify.get("/v1/admin/stats/providers", adminGuard, async (request) => {
+      const days = parseInt((request.query as any)?.days ?? "30", 10);
+      const summary = this.usage.getSummary(days);
+      return summary.byProvider;
+    });
+
+    this.fastify.get("/v1/admin/stats/export", adminGuard, async (request, reply) => {
+      const days = parseInt((request.query as any)?.days ?? "30", 10);
+      const csv = this.usage.exportCsv(days);
+      reply.header("Content-Type", "text/csv");
+      reply.header("Content-Disposition", `attachment; filename="token-pool-usage-${days}d.csv"`);
+      return csv;
     });
 
     // User management (admin only)
@@ -498,4 +532,28 @@ export class TokenPoolServer {
     await this.fastify.close();
     this.db.close();
   }
+}
+
+/**
+ * Count output tokens from SSE stream chunks.
+ * Parses "data:" lines as JSON and counts content delta length / 4.
+ */
+function countStreamTokens(chunk: Uint8Array): number {
+  const text = Buffer.from(chunk).toString("utf8");
+  let tokens = 0;
+  for (const line of text.split("\n")) {
+    if (!line.startsWith("data: ")) continue;
+    const data = line.slice(6).trim();
+    if (data === "[DONE]") continue;
+    try {
+      const parsed = JSON.parse(data);
+      const content = parsed?.choices?.[0]?.delta?.content;
+      if (typeof content === "string") {
+        tokens += Math.ceil(content.length / 4);
+      }
+    } catch {
+      // not valid JSON, skip
+    }
+  }
+  return tokens;
 }

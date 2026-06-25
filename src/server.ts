@@ -6,7 +6,8 @@ import { DatabaseService } from "@/db";
 import { CryptoService } from "@/auth/crypto";
 import { ProviderService } from "@/providers";
 import { ProviderProxy, ProxyError } from "@/providers/proxy";
-import { classifyRequest } from "@/router/classify";
+import { RateLimitGuard } from "@/providers/rate-limiter";
+import { classifyRequest, estimateTokens } from "@/router/classify";
 import { resolveTierModel, getFallbackChain, type ResolvedModel } from "@/router/resolve";
 import type { ChatCompletionRequest, ChatCompletionResponse } from "@/types";
 
@@ -16,6 +17,7 @@ export class TokenPoolServer {
   private crypto: CryptoService;
   private providers: ProviderService;
   private proxy: ProviderProxy;
+  private guard: RateLimitGuard;
   private config: AppConfig;
 
   constructor() {
@@ -26,6 +28,7 @@ export class TokenPoolServer {
     this.crypto = new CryptoService(this.config.appSecret);
     this.providers = new ProviderService(this.db);
     this.proxy = new ProviderProxy(this.providers, this.crypto);
+    this.guard = new RateLimitGuard(this.db, this.providers);
 
     this.fastify = Fastify({ logger: true });
   }
@@ -88,19 +91,19 @@ export class TokenPoolServer {
 
       // Check for explicit model (direct passthrough)
       if (body.model.includes("/")) {
-        // Model has provider prefix — try direct route
         return await this.handleDirectRoute(body, reply);
       }
 
       // Tier-based routing
       const explicitTier = request.headers["x-router-tier"] as string | undefined;
       const classification = classifyRequest(body, explicitTier);
-      const chain = getFallbackChain(this.db, this.providers, classification.tier);
+      const estTokens = estimateTokens(body) + (body.max_tokens ?? 1000);
+      const chain = getFallbackChain(this.db, this.providers, this.guard, classification.tier, estTokens);
 
       if (chain.length === 0) {
         return reply.code(503).send({
           error: {
-            message: `No models configured for tier '${classification.tier}'. Configure tier models via admin API.`,
+            message: `No models configured or available for tier '${classification.tier}'. Configure tier models via admin API.`,
             type: "no_provider",
             code: null,
           },
@@ -111,11 +114,20 @@ export class TokenPoolServer {
       for (const resolved of chain) {
         try {
           return await this.handleProxy(body, resolved, reply);
-        } catch (err) {
-          this.fastify.log.warn(
-            { err, model: resolved.modelId, provider: resolved.provider.name },
-            "Provider failed, trying next in chain"
-          );
+        } catch (err: any) {
+          // On 429, mark the key as backed off and try next
+          if (err instanceof ProxyError && err.statusCode === 429) {
+            this.guard.markBackoff(resolved.key.id);
+            this.fastify.log.warn(
+              { model: resolved.modelId, provider: resolved.provider.name },
+              "Provider 429 — key backed off, trying next in chain"
+            );
+          } else {
+            this.fastify.log.warn(
+              { err, model: resolved.modelId, provider: resolved.provider.name },
+              "Provider failed, trying next in chain"
+            );
+          }
           continue;
         }
       }
@@ -125,12 +137,10 @@ export class TokenPoolServer {
       });
     });
 
-    // ── Admin: Providers ──
     this.registerAdminRoutes();
   }
 
   private async handleDirectRoute(body: ChatCompletionRequest, reply: any) {
-    // Direct model: find provider that has this model
     const allModels = this.providers.listModels();
     const model = allModels.find(m => m.modelId === body.model);
     if (!model) {
@@ -146,27 +156,34 @@ export class TokenPoolServer {
       });
     }
 
-    const key = this.providers.listKeys(provider.id).find(k => k.enabled);
-    if (!key) {
-      return reply.code(503).send({
-        error: { message: "No API keys configured for this provider", type: "no_provider", code: null },
+    const estTokens = estimateTokens(body) + (body.max_tokens ?? 1000);
+    const decision = this.guard.tryAcquire(provider, estTokens);
+    if (!decision.allowed || !decision.key) {
+      return reply.code(429).send({
+        error: {
+          message: `Rate limit exceeded for ${provider.name}: ${decision.reason}`,
+          type: "rate_limit_exceeded",
+          code: null,
+        },
       });
     }
 
     const resolved: ResolvedModel = {
       modelId: body.model,
       provider,
-      providerKeyId: key.id,
+      key: decision.key,
     };
 
     return await this.handleProxy(body, resolved, reply);
   }
 
   private async handleProxy(body: ChatCompletionRequest, resolved: ResolvedModel, reply: any) {
-    const key = this.providers.listKeys(resolved.provider.id).find(k => k.id === resolved.providerKeyId);
-    if (!key) throw new ProxyError("Key not found", 500);
+    const result = await this.proxy.forward(resolved.provider, resolved.modelId, body, resolved.key);
 
-    const result = await this.proxy.forward(resolved.provider, resolved.modelId, body, key);
+    if (result.status === 429) {
+      this.guard.markBackoff(resolved.key.id);
+      throw new ProxyError(`Upstream 429 from ${resolved.provider.name}`, 429);
+    }
 
     if (result.status !== 200) {
       const text = typeof result.body === "string"
@@ -174,6 +191,9 @@ export class TokenPoolServer {
         : await new Response(result.body as any).text();
       throw new ProxyError(`Upstream ${result.status}: ${text}`, result.status);
     }
+
+    // Clear backoff on success
+    this.guard.clearBackoff(resolved.key.id);
 
     // Stream passthrough
     if (body.stream) {
@@ -211,7 +231,7 @@ export class TokenPoolServer {
     return reply.send(data);
   }
 
-  // ── Admin routes (v1 stub) ──
+  // ── Admin routes ──
   private registerAdminRoutes() {
     // Providers CRUD
     this.fastify.get("/v1/admin/providers", async () => {
@@ -270,6 +290,14 @@ export class TokenPoolServer {
       const keyId = parseInt((request.params as any).keyId, 10);
       const ok = this.providers.deleteKey(keyId);
       return ok ? reply.send({ ok }) : reply.code(404).send({ error: { message: "not found", type: "not_found", code: "null" } });
+    });
+
+    // Rate limit usage
+    this.fastify.get("/v1/admin/providers/:id/usage", async (request) => {
+      const id = parseInt((request.params as any).id, 10);
+      const provider = this.providers.get(id);
+      if (!provider) return { error: "not found" };
+      return this.guard.getProviderKeyUsage(provider);
     });
 
     // Tiers

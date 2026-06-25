@@ -100,7 +100,8 @@ CREATE TABLE IF NOT EXISTS rate_limit_state (
   window_type TEXT NOT NULL,
   window_start TEXT NOT NULL,
   requests_used INTEGER NOT NULL DEFAULT 0,
-  tokens_used INTEGER NOT NULL DEFAULT 0
+  tokens_used INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(key_id, window_type, window_start)
 );
 `;
 

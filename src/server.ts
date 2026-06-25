@@ -102,10 +102,10 @@ export class TokenPoolServer {
       await this.fastify.register(fastifyStatic, {
         root: webDir,
         prefix: "/ui/",
-        decorateReply: false,
+        decorateReply: true,
       });
-      // SPA fallback: /ui/* → index.html
-      this.fastify.get("/ui", async (_req, reply) => {
+      // SPA fallback: /ui → index.html
+      this.fastify.get("/ui", async (_req: any, reply: any) => {
         return reply.sendFile("index.html");
       });
     }
@@ -383,6 +383,7 @@ export class TokenPoolServer {
           name: body.name,
           baseUrl: body.baseUrl,
           type: body.type ?? "free",
+          wireFormat: body.wireFormat ?? "openai",
           rpmLimit: body.rpmLimit ?? null,
           rpdLimit: body.rpdLimit ?? null,
           tpmLimit: body.tpmLimit ?? null,

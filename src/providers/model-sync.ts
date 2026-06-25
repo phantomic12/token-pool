@@ -105,6 +105,7 @@ export class ModelMetadataSync {
           name: m.provider,
           baseUrl: "",
           type: "free",
+          wireFormat: "openai",
           rpmLimit: null, rpdLimit: null, tpmLimit: null, tpdLimit: null,
           enabled: false, // disabled until user configures base URL + key
         });
@@ -157,6 +158,7 @@ export class ModelMetadataSync {
           name: providerName,
           baseUrl: "",
           type: "free",
+          wireFormat: "openai",
           rpmLimit: null, rpdLimit: null, tpmLimit: null, tpdLimit: null,
           enabled: false,
         });

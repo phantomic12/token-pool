@@ -1,10 +1,10 @@
-import type { Provider, ProviderKey, ModelMetadata } from "@/types";
+import type { Provider, ProviderKey, ModelMetadata, WireFormat } from "@/types";
 import type { DatabaseService } from "@/db";
 
 // ── Row mappers (snake_case DB → camelCase TS) ──
 
 interface ProviderRow {
-  id: number; name: string; base_url: string; type: "free" | "paid";
+  id: number; name: string; base_url: string; type: "free" | "paid"; wire_format: string;
   rpm_limit: number | null; rpd_limit: number | null; tpm_limit: number | null; tpd_limit: number | null;
   enabled: number; created_at: string;
 }
@@ -25,6 +25,7 @@ interface ModelRow {
 function mapProvider(r: ProviderRow): Provider {
   return {
     id: r.id, name: r.name, baseUrl: r.base_url, type: r.type,
+    wireFormat: r.wire_format as WireFormat,
     rpmLimit: r.rpm_limit, rpdLimit: r.rpd_limit, tpmLimit: r.tpm_limit, tpdLimit: r.tpd_limit,
     enabled: r.enabled === 1, createdAt: r.created_at,
   };
@@ -70,13 +71,14 @@ export class ProviderService {
 
   create(p: Omit<Provider, "id" | "createdAt">): number {
     const stmt = this.db.prepare(
-      `INSERT INTO providers (name, base_url, type, rpm_limit, rpd_limit, tpm_limit, tpd_limit, enabled)
-       VALUES (@name, @base_url, @type, @rpm_limit, @rpd_limit, @tpm_limit, @tpd_limit, @enabled)`
+      `INSERT INTO providers (name, base_url, type, wire_format, rpm_limit, rpd_limit, tpm_limit, tpd_limit, enabled)
+       VALUES (@name, @base_url, @type, @wire_format, @rpm_limit, @rpd_limit, @tpm_limit, @tpd_limit, @enabled)`
     );
     const result = stmt.run({
       name: p.name,
       base_url: p.baseUrl,
       type: p.type,
+      wire_format: p.wireFormat ?? "openai",
       rpm_limit: p.rpmLimit,
       rpd_limit: p.rpdLimit,
       tpm_limit: p.tpmLimit,
@@ -91,9 +93,9 @@ export class ProviderService {
     if (!existing) return false;
     const merged = { ...existing, ...p };
     this.db.prepare(
-      `UPDATE providers SET name=?, base_url=?, type=?, rpm_limit=?, rpd_limit=?, tpm_limit=?, tpd_limit=?, enabled=? WHERE id=?`
+      `UPDATE providers SET name=?, base_url=?, type=?, wire_format=?, rpm_limit=?, rpd_limit=?, tpm_limit=?, tpd_limit=?, enabled=? WHERE id=?`
     ).run(
-      merged.name, merged.baseUrl, merged.type,
+      merged.name, merged.baseUrl, merged.type, merged.wireFormat,
       merged.rpmLimit, merged.rpdLimit, merged.tpmLimit, merged.tpdLimit,
       merged.enabled ? 1 : 0, id
     );

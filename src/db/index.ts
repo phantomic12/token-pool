@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS providers (
   name TEXT UNIQUE NOT NULL,
   base_url TEXT NOT NULL,
   type TEXT NOT NULL DEFAULT 'free',
+  wire_format TEXT NOT NULL DEFAULT 'openai',
   rpm_limit INTEGER,
   rpd_limit INTEGER,
   tpm_limit INTEGER,
@@ -51,7 +52,8 @@ CREATE TABLE IF NOT EXISTS models (
   input_cost_per_mtok REAL,
   output_cost_per_mtok REAL,
   max_output_tokens INTEGER,
-  fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+  fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(provider_id, model_id)
 );
 
 CREATE TABLE IF NOT EXISTS tiers (
@@ -113,17 +115,48 @@ const SEED_TIERS = [
   ["multimodal", "Image/audio/video input"],
 ];
 
-// Free provider seeded defaults
-const SEED_PROVIDERS = [
-  // name, base_url, type, rpm, rpd, tpm, tpd
-  ["openrouter-free", "https://openrouter.ai/api/v1", "free", 20, 1000, null, null],
-  ["google-aistudio", "https://generativelanguage.googleapis.com/v1beta/openai", "free", 15, 1500, 250000, null],
-  ["groq", "https://api.groq.com/openai/v1", "free", 30, 1000, 12000, 100000],
-  ["cerebras", "https://api.cerebras.ai/v1", "free", null, null, null, 1000000],
-  ["mistral-experiment", "https://api.mistral.ai/v1", "free", null, null, null, null],
-  ["github-models", "https://models.inference.ai.azure.com", "free", null, null, null, null],
-  ["cohere-trial", "https://api.cohere.ai/v1", "free", null, null, null, null],
+// Full provider list — wire formats from manifest's provider-endpoints.ts,
+// rate limits from cheahjs/free-llm-api-resources.
+// Fields: name, base_url, type, wire_format, rpm, rpd, tpm, tpd
+const SEED_PROVIDERS: [string, string, string, string, number | null, number | null, number | null, number | null][] = [
+  // ── Free providers (cheahjs) ──
+  ["openrouter", "https://openrouter.ai/api/v1", "free", "openai", 20, 1000, null, null],
+  ["google", "https://generativelanguage.googleapis.com/v1beta/openai", "free", "openai", 15, 1500, 250000, null],
+  ["groq", "https://api.groq.com/openai/v1", "free", "openai", 30, 1000, 12000, 100000],
+  ["cerebras", "https://api.cerebras.ai/v1", "free", "openai", 30, 14400, 60000, 1000000],
+  ["mistral", "https://api.mistral.ai/v1", "free", "openai", 1, null, 500000, null],
+  ["github-models", "https://models.inference.ai.azure.com", "free", "openai", null, null, null, null],
+  ["cohere", "https://api.cohere.ai/v1", "free", "openai", 20, null, null, 1000],
+  ["cloudflare", "https://api.cloudflare.com/client/v4/accounts", "free", "openai", null, null, null, null],
+  ["huggingface", "https://api-inference.huggingface.co", "free", "openai", null, null, null, null],
+  ["nvidia", "https://integrate.api.nvidia.com/v1", "free", "openai", 40, null, null, null],
+  ["sambanova", "https://api.sambanova.ai/v1", "free", "openai", null, null, null, null],
+
+  // ── Paid providers (manifest) ──
+  ["openai", "https://api.openai.com/v1", "paid", "openai", null, null, null, null],
+  ["anthropic", "https://api.anthropic.com", "paid", "anthropic", null, null, null, null],
+  ["deepseek", "https://api.deepseek.com/v1", "paid", "openai", null, null, null, null],
+  ["xai", "https://api.x.ai/v1", "paid", "openai", null, null, null, null],
+  ["minimax", "https://api.minimax.io/v1", "paid", "openai", null, null, null, null],
+  ["qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "paid", "openai", null, null, null, null],
+  ["moonshot", "https://api.moonshot.ai/v1", "paid", "openai", null, null, null, null],
+  ["zai", "https://api.z.ai/api/paas/v4", "paid", "openai", null, null, null, null],
+  ["xiaomi", "https://api.xiaomimimo.com/v1", "paid", "openai", null, null, null, null],
+  ["fireworks", "https://api.fireworks.ai/inference/v1", "paid", "openai", null, null, null, null],
+  ["bedrock", "https://bedrock-runtime.us-east-1.amazonaws.com", "paid", "openai", null, null, null, null],
+  ["byteplus", "https://ark.ap-southeast.bytepluses.com/api/coding/v3", "paid", "openai", null, null, null, null],
+  ["commandcode", "https://api.commandcode.ai/provider/v1", "paid", "openai", null, null, null, null],
+
+  // ── Local providers ──
+  ["ollama", "http://localhost:11434/v1", "free", "openai", null, null, null, null],
+  ["llamacpp", "http://localhost:8080/v1", "free", "openai", null, null, null, null],
+  ["lmstudio", "http://localhost:1234/v1", "free", "openai", null, null, null, null],
 ];
+
+// Migration: add wire_format column to existing providers table if missing
+const MIGRATION_ADD_WIRE_FORMAT = `
+ALTER TABLE providers ADD COLUMN wire_format TEXT NOT NULL DEFAULT 'openai';
+`;
 
 export class DatabaseService {
   private db: DB;
@@ -140,7 +173,42 @@ export class DatabaseService {
 
   private init() {
     this.db.exec(SCHEMA);
+    this.migrate();
     this.seedDefaults();
+  }
+
+  private migrate() {
+    // Check if wire_format column exists
+    const cols = this.db.prepare("PRAGMA table_info(providers)").all() as { name: string }[];
+    if (!cols.some(c => c.name === "wire_format")) {
+      this.db.exec(MIGRATION_ADD_WIRE_FORMAT);
+    }
+
+    // Check if models table has UNIQUE constraint on (provider_id, model_id)
+    // SQLite can't alter constraints in-place, so recreate if missing
+    const indexes = this.db.prepare("PRAGMA index_list(models)").all() as { name: string; origin: string }[];
+    const hasUnique = indexes.some(i => i.origin === "u" || i.name === "sqlite_autoindex_models_2");
+    if (!hasUnique) {
+      // Recreate models table with the constraint
+      this.db.exec("DROP TABLE IF EXISTS models");
+      this.db.exec(`
+        CREATE TABLE models (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          provider_id INTEGER REFERENCES providers(id) ON DELETE CASCADE,
+          model_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          context_window INTEGER DEFAULT 0,
+          supports_vision INTEGER NOT NULL DEFAULT 0,
+          supports_audio INTEGER NOT NULL DEFAULT 0,
+          supports_tools INTEGER NOT NULL DEFAULT 0,
+          input_cost_per_mtok REAL,
+          output_cost_per_mtok REAL,
+          max_output_tokens INTEGER,
+          fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(provider_id, model_id)
+        )
+      `);
+    }
   }
 
   private seedDefaults() {
@@ -150,8 +218,8 @@ export class DatabaseService {
     }
 
     const provStmt = this.db.prepare(
-      `INSERT OR IGNORE INTO providers (name, base_url, type, rpm_limit, rpd_limit, tpm_limit, tpd_limit)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT OR IGNORE INTO providers (name, base_url, type, wire_format, rpm_limit, rpd_limit, tpm_limit, tpd_limit)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const p of SEED_PROVIDERS) {
       provStmt.run(...p);

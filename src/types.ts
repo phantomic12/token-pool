@@ -73,11 +73,14 @@ export interface ErrorResponse {
 
 // ── Provider types ──
 
+export type WireFormat = "openai" | "google" | "anthropic";
+
 export interface Provider {
   id: number;
   name: string;
   baseUrl: string;
   type: "free" | "paid";
+  wireFormat: WireFormat;
   rpmLimit: number | null;
   rpdLimit: number | null;
   tpmLimit: number | null;

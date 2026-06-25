@@ -9,6 +9,7 @@ import { ProviderProxy, ProxyError } from "@/providers/proxy";
 import { RateLimitGuard } from "@/providers/rate-limiter";
 import { ModelMetadataSync } from "@/providers/model-sync";
 import { FusionService } from "@/fusion";
+import { FusionEngine, FusionError } from "@/fusion/engine";
 import { UserService } from "@/auth/user-service";
 import { registerAuth, setupAuthGuards, signToken, type JwtPayload } from "@/auth/middleware";
 import { UsageTracker } from "@/stats";
@@ -24,6 +25,7 @@ export class TokenPoolServer {
   private proxy: ProviderProxy;
   private guard: RateLimitGuard;
   private fusion: FusionService;
+  private fusionEngine: FusionEngine;
   private modelSync: ModelMetadataSync;
   private users: UserService;
   private usage: UsageTracker;
@@ -39,6 +41,7 @@ export class TokenPoolServer {
     this.proxy = new ProviderProxy(this.providers, this.crypto);
     this.guard = new RateLimitGuard(this.db, this.providers);
     this.fusion = new FusionService(this.db);
+    this.fusionEngine = new FusionEngine(this.providers, this.proxy, this.crypto, this.guard, this.fusion);
     this.modelSync = new ModelMetadataSync(this.providers, this.config.modelsRefreshIntervalSec);
     this.users = new UserService(this.db);
     this.usage = new UsageTracker(this.db);
@@ -139,9 +142,31 @@ export class TokenPoolServer {
 
       // Check for fusion trigger
       if (body.model.startsWith("fusion:")) {
-        return reply.code(501).send({
-          error: { message: "Fusion engine not yet implemented", type: "not_implemented", code: null },
-        });
+        try {
+          const result = await this.fusionEngine.execute(body, body.model);
+          reply.header("x-resolved-model", `fusion:${result.poolName}`);
+
+          // Record fusion usage
+          this.usage.record({
+            userId: 1,
+            providerId: null,
+            modelId: `fusion:${result.poolName}`,
+            tier: "fusion",
+            inputTokens: result.response.usage?.prompt_tokens ?? 0,
+            outputTokens: result.response.usage?.completion_tokens ?? 0,
+            latencyMs: 0,
+            fusionPoolId: this.fusion.getByName(result.poolName)?.id,
+          });
+
+          return reply.send(result.response);
+        } catch (err: any) {
+          if (err instanceof FusionError) {
+            return reply.code(err.statusCode).send({
+              error: { message: err.message, type: "fusion_error", code: null },
+            });
+          }
+          throw err;
+        }
       }
 
       // Check for explicit model (direct passthrough)

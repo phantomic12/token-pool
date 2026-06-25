@@ -9,6 +9,8 @@ import { ProviderProxy, ProxyError } from "@/providers/proxy";
 import { RateLimitGuard } from "@/providers/rate-limiter";
 import { ModelMetadataSync } from "@/providers/model-sync";
 import { FusionService } from "@/fusion";
+import { UserService } from "@/auth/user-service";
+import { registerAuth, setupAuthGuards, signToken, type JwtPayload } from "@/auth/middleware";
 import { classifyRequest, estimateTokens } from "@/router/classify";
 import { resolveTierModel, getFallbackChain, type ResolvedModel } from "@/router/resolve";
 import type { ChatCompletionRequest, ChatCompletionResponse } from "@/types";
@@ -22,6 +24,7 @@ export class TokenPoolServer {
   private guard: RateLimitGuard;
   private fusion: FusionService;
   private modelSync: ModelMetadataSync;
+  private users: UserService;
   private config: AppConfig;
 
   constructor() {
@@ -35,6 +38,7 @@ export class TokenPoolServer {
     this.guard = new RateLimitGuard(this.db, this.providers);
     this.fusion = new FusionService(this.db);
     this.modelSync = new ModelMetadataSync(this.providers, this.config.modelsRefreshIntervalSec);
+    this.users = new UserService(this.db);
 
     this.fastify = Fastify({ logger: true });
   }
@@ -50,6 +54,7 @@ export class TokenPoolServer {
     await this.registerPlugins();
     this.registerRoutes();
     this.modelSync.start();
+    this.bootstrapAdmin();
 
     try {
       await this.fastify.listen({ port: this.config.port, host: this.config.host });
@@ -59,13 +64,53 @@ export class TokenPoolServer {
     }
   }
 
+  private bootstrapAdmin() {
+    const result = this.users.bootstrapAdmin(this.config.adminPassword);
+    if (result) {
+      const banner = "═".repeat(63);
+      console.log(`\n${banner}`);
+      console.log("  token-pool: first-run admin bootstrap");
+      console.log(banner);
+      console.log(`  Username: ${result.username}`);
+      console.log(`  Password: ${result.password}`);
+      console.log("\n  Save this password. It will NOT be shown again.");
+      console.log(`${banner}\n`);
+    }
+  }
+
   private async registerPlugins() {
     await this.fastify.register(cors, { origin: true });
+    registerAuth(this.fastify, this.config.appSecret);
+    setupAuthGuards(this.fastify, this.users);
   }
 
   private registerRoutes() {
     // ── Health ──
     this.fastify.get("/health", async () => ({ status: "ok" }));
+
+    // ── Auth: login ──
+    this.fastify.post("/v1/auth/login", async (request, reply) => {
+      const { username, password } = request.body as { username: string; password: string };
+      if (!username || !password) {
+        return reply.code(400).send({ error: { message: "username and password required", type: "invalid_request", code: null } });
+      }
+      const user = this.users.verifyPassword(username, password);
+      if (!user) {
+        return reply.code(401).send({ error: { message: "Invalid credentials", type: "auth_error", code: null } });
+      }
+      const token = signToken(this.fastify, user);
+      return { token, user: { id: user.id, username: user.username, role: user.role } };
+    });
+
+    // ── Auth: me ──
+    this.fastify.get("/v1/auth/me", {
+      preHandler: this.fastify.authVerify,
+    }, async (request) => {
+      const payload = (request as any).user as JwtPayload;
+      const user = this.users.getById(payload.sub);
+      if (!user) return { error: "user not found" };
+      return { id: user.id, username: user.username, role: user.role };
+    });
 
     // ── List models ──
     this.fastify.get("/v1/models", async () => {
@@ -238,14 +283,16 @@ export class TokenPoolServer {
     return reply.send(data);
   }
 
-  // ── Admin routes ──
+  // ── Admin routes (auth required) ──
   private registerAdminRoutes() {
+    const adminGuard = { preHandler: [this.fastify.authVerify, this.fastify.authAdmin] };
+
     // Providers CRUD
-    this.fastify.get("/v1/admin/providers", async () => {
+    this.fastify.get("/v1/admin/providers", adminGuard, async () => {
       return this.providers.list();
     });
 
-    this.fastify.post("/v1/admin/providers", async (request, reply) => {
+    this.fastify.post("/v1/admin/providers", adminGuard, async (request, reply) => {
       const body = request.body as any;
       try {
         const id = this.providers.create({
@@ -266,26 +313,26 @@ export class TokenPoolServer {
       }
     });
 
-    this.fastify.put("/v1/admin/providers/:id", async (request, reply) => {
+    this.fastify.put("/v1/admin/providers/:id", adminGuard, async (request, reply) => {
       const id = parseInt((request.params as any).id, 10);
       const body = request.body as any;
       const ok = this.providers.update(id, body);
       return ok ? reply.send({ ok }) : reply.code(404).send({ error: { message: "not found", type: "not_found", code: null } });
     });
 
-    this.fastify.delete("/v1/admin/providers/:id", async (request, reply) => {
+    this.fastify.delete("/v1/admin/providers/:id", adminGuard, async (request, reply) => {
       const id = parseInt((request.params as any).id, 10);
       const ok = this.providers.delete(id);
       return ok ? reply.send({ ok }) : reply.code(404).send({ error: { message: "not found", type: "not_found", code: null } });
     });
 
     // Provider keys
-    this.fastify.get("/v1/admin/providers/:id/keys", async (request) => {
+    this.fastify.get("/v1/admin/providers/:id/keys", adminGuard, async (request) => {
       const id = parseInt((request.params as any).id, 10);
       return this.providers.listKeys(id);
     });
 
-    this.fastify.post("/v1/admin/providers/:id/keys", async (request, reply) => {
+    this.fastify.post("/v1/admin/providers/:id/keys", adminGuard, async (request, reply) => {
       const providerId = parseInt((request.params as any).id, 10);
       const body = request.body as any;
       const encKey = this.crypto.encrypt(body.apiKey);
@@ -293,14 +340,14 @@ export class TokenPoolServer {
       return reply.code(201).send({ id: keyId });
     });
 
-    this.fastify.delete("/v1/admin/providers/:id/keys/:keyId", async (request, reply) => {
+    this.fastify.delete("/v1/admin/providers/:id/keys/:keyId", adminGuard, async (request, reply) => {
       const keyId = parseInt((request.params as any).keyId, 10);
       const ok = this.providers.deleteKey(keyId);
       return ok ? reply.send({ ok }) : reply.code(404).send({ error: { message: "not found", type: "not_found", code: "null" } });
     });
 
     // Rate limit usage
-    this.fastify.get("/v1/admin/providers/:id/usage", async (request) => {
+    this.fastify.get("/v1/admin/providers/:id/usage", adminGuard, async (request) => {
       const id = parseInt((request.params as any).id, 10);
       const provider = this.providers.get(id);
       if (!provider) return { error: "not found" };
@@ -308,18 +355,18 @@ export class TokenPoolServer {
     });
 
     // Tiers
-    this.fastify.get("/v1/admin/tiers", async () => {
+    this.fastify.get("/v1/admin/tiers", adminGuard, async () => {
       return this.db.prepare("SELECT * FROM tiers ORDER BY id").all();
     });
 
-    this.fastify.get("/v1/admin/tiers/:name/models", async (request) => {
+    this.fastify.get("/v1/admin/tiers/:name/models", adminGuard, async (request) => {
       const name = (request.params as any).name;
       const tierRow = this.db.prepare("SELECT id FROM tiers WHERE name = ?").get(name) as { id: number } | undefined;
       if (!tierRow) return [];
       return this.db.prepare("SELECT * FROM tier_models WHERE tier_id = ? ORDER BY priority").all(tierRow.id);
     });
 
-    this.fastify.put("/v1/admin/tiers/:name/models", async (request, reply) => {
+    this.fastify.put("/v1/admin/tiers/:name/models", adminGuard, async (request, reply) => {
       const name = (request.params as any).name;
       const tierRow = this.db.prepare("SELECT id FROM tiers WHERE name = ?").get(name) as { id: number } | undefined;
       if (!tierRow) return reply.code(404).send({ error: { message: "tier not found", type: "not_found", code: "null" } });
@@ -336,11 +383,11 @@ export class TokenPoolServer {
     });
 
     // Fusion pools
-    this.fastify.get("/v1/admin/fusion-pools", async () => {
+    this.fastify.get("/v1/admin/fusion-pools", adminGuard, async () => {
       return this.fusion.list();
     });
 
-    this.fastify.post("/v1/admin/fusion-pools", async (request, reply) => {
+    this.fastify.post("/v1/admin/fusion-pools", adminGuard, async (request, reply) => {
       const body = request.body as any;
       try {
         const id = this.fusion.create(
@@ -354,25 +401,25 @@ export class TokenPoolServer {
       }
     });
 
-    this.fastify.put("/v1/admin/fusion-pools/:id", async (request, reply) => {
+    this.fastify.put("/v1/admin/fusion-pools/:id", adminGuard, async (request, reply) => {
       const id = parseInt((request.params as any).id, 10);
       const body = request.body as any;
       const ok = this.fusion.update(id, body);
       return ok ? reply.send({ ok }) : reply.code(404).send({ error: { message: "not found", type: "not_found", code: null } });
     });
 
-    this.fastify.delete("/v1/admin/fusion-pools/:id", async (request, reply) => {
+    this.fastify.delete("/v1/admin/fusion-pools/:id", adminGuard, async (request, reply) => {
       const id = parseInt((request.params as any).id, 10);
       const ok = this.fusion.delete(id);
       return ok ? reply.send({ ok }) : reply.code(404).send({ error: { message: "not found", type: "not_found", code: null } });
     });
 
-    this.fastify.get("/v1/admin/fusion-pools/:id/members", async (request) => {
+    this.fastify.get("/v1/admin/fusion-pools/:id/members", adminGuard, async (request) => {
       const id = parseInt((request.params as any).id, 10);
       return this.fusion.listMembers(id);
     });
 
-    this.fastify.put("/v1/admin/fusion-pools/:id/members", async (request, reply) => {
+    this.fastify.put("/v1/admin/fusion-pools/:id/members", adminGuard, async (request, reply) => {
       const id = parseInt((request.params as any).id, 10);
       if (!this.fusion.get(id)) return reply.code(404).send({ error: { message: "not found", type: "not_found", code: null } });
       const members = request.body as Array<{ modelId: string; providerId: number; position: number }>;
@@ -381,18 +428,18 @@ export class TokenPoolServer {
     });
 
     // Models
-    this.fastify.get("/v1/admin/models", async (request) => {
+    this.fastify.get("/v1/admin/models", adminGuard, async (request) => {
       const providerId = (request.query as any)?.providerId ? parseInt((request.query as any).providerId, 10) : undefined;
       return this.providers.listModels(providerId);
     });
 
-    this.fastify.post("/v1/admin/models/sync", async () => {
+    this.fastify.post("/v1/admin/models/sync", adminGuard, async () => {
       const result = await this.modelSync.sync();
       return result;
     });
 
     // Stats
-    this.fastify.get("/v1/admin/stats", async () => {
+    this.fastify.get("/v1/admin/stats", adminGuard, async () => {
       const total = this.db.prepare(
         "SELECT COUNT(*) as count, COALESCE(SUM(input_tokens), 0) as input_tokens, COALESCE(SUM(output_tokens), 0) as output_tokens FROM usage_events"
       ).get();
@@ -407,18 +454,42 @@ export class TokenPoolServer {
       return { total, byProvider, byTier };
     });
 
-    this.fastify.get("/v1/admin/stats/users", async () => {
+    this.fastify.get("/v1/admin/stats/users", adminGuard, async () => {
       return this.db.prepare(
         `SELECT user_id, COUNT(*) as count, SUM(input_tokens) as input_tokens, SUM(output_tokens) as output_tokens
          FROM usage_events GROUP BY user_id ORDER BY count DESC`
       ).all();
     });
 
-    this.fastify.get("/v1/admin/stats/providers", async () => {
+    this.fastify.get("/v1/admin/stats/providers", adminGuard, async () => {
       return this.db.prepare(
         `SELECT provider_id, COUNT(*) as count, SUM(input_tokens) as input_tokens, SUM(output_tokens) as output_tokens
          FROM usage_events GROUP BY provider_id ORDER BY count DESC`
       ).all();
+    });
+
+    // User management (admin only)
+    this.fastify.get("/v1/admin/users", adminGuard, async () => {
+      return this.users.list();
+    });
+
+    this.fastify.post("/v1/admin/users", adminGuard, async (request, reply) => {
+      const { username, password, role } = request.body as { username: string; password: string; role?: "admin" | "regular" };
+      if (!username || !password) {
+        return reply.code(400).send({ error: { message: "username and password required", type: "invalid_request", code: null } });
+      }
+      try {
+        const id = this.users.create(username, password, role ?? "regular");
+        return reply.code(201).send({ id });
+      } catch (err: any) {
+        return reply.code(400).send({ error: { message: err.message, type: "invalid_request", code: null } });
+      }
+    });
+
+    this.fastify.delete("/v1/admin/users/:id", adminGuard, async (request, reply) => {
+      const id = parseInt((request.params as any).id, 10);
+      const ok = this.users.delete(id);
+      return ok ? reply.send({ ok }) : reply.code(404).send({ error: { message: "not found", type: "not_found", code: null } });
     });
   }
 

@@ -39,8 +39,25 @@ const styleEl = document.createElement("style");
 styleEl.textContent = themeStyle;
 document.head.appendChild(styleEl);
 
-if (localStorage.getItem("theme") === "dark") {
-  document.documentElement.classList.add("dark");
+// Apply theme: localStorage wins, otherwise follow system preference
+function getPreferredTheme(): "light" | "dark" {
+  const stored = localStorage.getItem("theme");
+  if (stored === "dark" || stored === "light") return stored;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function applyTheme(t: "light" | "dark") {
+  if (t === "dark") document.documentElement.classList.add("dark");
+  else document.documentElement.classList.remove("dark");
+}
+
+applyTheme(getPreferredTheme());
+
+// If user hasn't set a manual preference, track system theme changes
+if (!localStorage.getItem("theme")) {
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
+    applyTheme(e.matches ? "dark" : "light");
+  });
 }
 
 function useTheme() {
@@ -51,11 +68,7 @@ function useTheme() {
     setTheme(prev => {
       const next = prev === "dark" ? "light" : "dark";
       localStorage.setItem("theme", next);
-      if (next === "dark") {
-        document.documentElement.classList.add("dark");
-      } else {
-        document.documentElement.classList.remove("dark");
-      }
+      applyTheme(next);
       return next;
     });
   }, []);
@@ -261,35 +274,174 @@ function KeysButton({ providerId }: { providerId: number }) {
   );
 }
 
+// ── Provider presets ──
+// User picks a known provider, everything auto-fills. Can still customize.
+const PROVIDER_PRESETS: { name: string; baseUrl: string; type: string; wireFormat: string; rpm?: number | null; rpd?: number | null; tpm?: number | null; tpd?: number | null; keyHint?: string }[] = [
+  // Free
+  { name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", type: "free", wireFormat: "openai", rpm: 20, rpd: 1000, keyHint: "sk-or-..." },
+  { name: "Google AI Studio", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", type: "free", wireFormat: "openai", rpm: 15, rpd: 1500, tpm: 250000, keyHint: "AIza..." },
+  { name: "Groq", baseUrl: "https://api.groq.com/openai/v1", type: "free", wireFormat: "openai", rpm: 30, rpd: 1000, tpm: 12000, keyHint: "gsk_..." },
+  { name: "Cerebras", baseUrl: "https://api.cerebras.ai/v1", type: "free", wireFormat: "openai", rpm: 30, rpd: 14400, tpm: 60000, keyHint: "csk-..." },
+  { name: "Mistral", baseUrl: "https://api.mistral.ai/v1", type: "free", wireFormat: "openai", rpm: 1, tpm: 500000, keyHint: "API key" },
+  { name: "GitHub Models", baseUrl: "https://models.inference.ai.azure.com", type: "free", wireFormat: "openai", keyHint: "ghp_..." },
+  { name: "Cohere", baseUrl: "https://api.cohere.ai/v1", type: "free", wireFormat: "openai", rpm: 20, tpd: 1000, keyHint: "API key" },
+  { name: "HuggingFace", baseUrl: "https://api-inference.huggingface.co", type: "free", wireFormat: "openai", keyHint: "hf_..." },
+  { name: "NVIDIA NIM", baseUrl: "https://integrate.api.nvidia.com/v1", type: "free", wireFormat: "openai", rpm: 40, keyHint: "nvapi-..." },
+  { name: "SambaNova", baseUrl: "https://api.sambanova.ai/v1", type: "free", wireFormat: "openai", keyHint: "API key" },
+  // Paid
+  { name: "OpenAI", baseUrl: "https://api.openai.com/v1", type: "paid", wireFormat: "openai", keyHint: "sk-..." },
+  { name: "Anthropic", baseUrl: "https://api.anthropic.com", type: "paid", wireFormat: "anthropic", keyHint: "sk-ant-..." },
+  { name: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", type: "paid", wireFormat: "openai", keyHint: "sk-..." },
+  { name: "xAI", baseUrl: "https://api.x.ai/v1", type: "paid", wireFormat: "openai", keyHint: "xai-..." },
+  { name: "MiniMax", baseUrl: "https://api.minimax.io/v1", type: "paid", wireFormat: "openai", keyHint: "sk-..." },
+  { name: "Qwen / Alibaba", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", type: "paid", wireFormat: "openai", keyHint: "sk-..." },
+  { name: "Moonshot / Kimi", baseUrl: "https://api.moonshot.ai/v1", type: "paid", wireFormat: "openai", keyHint: "sk-..." },
+  { name: "Z.ai", baseUrl: "https://api.z.ai/api/paas/v4", type: "paid", wireFormat: "openai", keyHint: "API key" },
+  { name: "Fireworks AI", baseUrl: "https://api.fireworks.ai/inference/v1", type: "paid", wireFormat: "openai", keyHint: "fw_..." },
+  // Local
+  { name: "Ollama", baseUrl: "http://localhost:11434/v1", type: "local", wireFormat: "openai" },
+  { name: "llama.cpp", baseUrl: "http://localhost:8080/v1", type: "local", wireFormat: "openai" },
+  { name: "LM Studio", baseUrl: "http://localhost:1234/v1", type: "local", wireFormat: "openai" },
+  { name: "Custom", baseUrl: "", type: "free", wireFormat: "openai" },
+];
+
 function AddProvider({ onDone }: { onDone: () => void }) {
+  const [presetIdx, setPresetIdx] = useState(0);
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [type, setType] = useState("free");
   const [wireFormat, setWireFormat] = useState("openai");
+  const [rpm, setRpm] = useState("");
+  const [rpd, setRpd] = useState("");
+  const [tpm, setTpm] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [error, setError] = useState("");
+
+  const selectPreset = (idx: number) => {
+    setPresetIdx(idx);
+    const p = PROVIDER_PRESETS[idx];
+    setName(p.name === "Custom" ? "" : p.name);
+    setBaseUrl(p.baseUrl);
+    setType(p.type);
+    setWireFormat(p.wireFormat);
+    setRpm(p.rpm != null ? String(p.rpm) : "");
+    setRpd(p.rpd != null ? String(p.rpd) : "");
+    setTpm(p.tpm != null ? String(p.tpm) : "");
+    setApiKey("");
+    setError("");
+  };
 
   const submit = async () => {
-    await api("/admin/providers", { method: "POST", body: JSON.stringify({ name, baseUrl, type, wireFormat, enabled: true }) });
-    setName(""); setBaseUrl(""); onDone();
+    if (!name.trim()) { setError("Name is required"); return; }
+    if (!baseUrl.trim() && type !== "local") { setError("Base URL is required"); return; }
+    try {
+      const body: any = {
+        name: name.trim(),
+        baseUrl: baseUrl.trim(),
+        type,
+        wireFormat,
+        rpmLimit: rpm ? Number(rpm) : null,
+        rpdLimit: rpd ? Number(rpd) : null,
+        tpmLimit: tpm ? Number(tpm) : null,
+        enabled: true,
+      };
+      const res = await api("/admin/providers", { method: "POST", body: JSON.stringify(body) });
+      const providerId = res.id;
+      // If API key provided, add it immediately
+      if (apiKey.trim() && providerId) {
+        await api(`/admin/providers/${providerId}/keys`, {
+          method: "POST",
+          body: JSON.stringify({ apiKey: apiKey.trim(), label: "default" }),
+        });
+      }
+      // Reset
+      setPresetIdx(0);
+      setName(""); setBaseUrl(""); setApiKey("");
+      onDone();
+    } catch (e: any) {
+      setError(e.message || "Failed to create provider");
+    }
   };
+
+  const preset = PROVIDER_PRESETS[presetIdx];
+  const isCustom = preset.name === "Custom";
 
   return (
     <div style={{ ...cardStyle, marginTop: 16 }}>
-      <input placeholder="name" value={name} onChange={e => setName(e.target.value)} style={inputStyle} />
-      <input placeholder="base URL" value={baseUrl} onChange={e => setBaseUrl(e.target.value)} style={inputStyle} />
-      <div style={{ display: "flex", gap: 8 }}>
-        <select value={type} onChange={e => setType(e.target.value)} style={inputStyle}>
-          <option value="free">Free Tier</option>
-          <option value="paid">Paid</option>
-          <option value="local">Local</option>
-          <option value="subscription">Subscription</option>
-        </select>
-        <select value={wireFormat} onChange={e => setWireFormat(e.target.value)} style={inputStyle}>
-          <option value="openai">OpenAI</option>
-          <option value="anthropic">Anthropic</option>
-          <option value="google">Google</option>
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ fontSize: 13, color: "var(--text-secondary)", display: "block", marginBottom: 4 }}>Provider template</label>
+        <select
+          value={presetIdx}
+          onChange={e => selectPreset(Number(e.target.value))}
+          style={{ ...inputStyle, cursor: "pointer" }}
+        >
+          {PROVIDER_PRESETS.map((p, i) => (
+            <option key={i} value={i}>
+              {p.name} {p.type !== "free" && p.type !== "local" ? `(${p.type})` : p.type === "local" ? "(local)" : ""}
+            </option>
+          ))}
         </select>
       </div>
-      <button onClick={submit} style={btnStyle}>Create</button>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div>
+          <label style={labelStyle}>Name</label>
+          <input placeholder="provider name" value={name} onChange={e => setName(e.target.value)} style={inputStyle} disabled={!isCustom && preset.name !== "Custom"} />
+        </div>
+        <div>
+          <label style={labelStyle}>Base URL</label>
+          <input placeholder="https://..." value={baseUrl} onChange={e => setBaseUrl(e.target.value)} style={inputStyle} />
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+        <div>
+          <label style={labelStyle}>Category</label>
+          <select value={type} onChange={e => setType(e.target.value)} style={{ ...inputStyle, cursor: "pointer" }}>
+            <option value="free">Free Tier</option>
+            <option value="paid">Paid</option>
+            <option value="local">Local</option>
+            <option value="subscription">Subscription</option>
+          </select>
+        </div>
+        <div>
+          <label style={labelStyle}>Wire Format</label>
+          <select value={wireFormat} onChange={e => setWireFormat(e.target.value)} style={{ ...inputStyle, cursor: "pointer" }}>
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="google">Google</option>
+          </select>
+        </div>
+        <div>
+          <label style={labelStyle}>RPM Limit</label>
+          <input placeholder="—" value={rpm} onChange={e => setRpm(e.target.value)} style={inputStyle} type="number" />
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div>
+          <label style={labelStyle}>RPD Limit</label>
+          <input placeholder="—" value={rpd} onChange={e => setRpd(e.target.value)} style={inputStyle} type="number" />
+        </div>
+        <div>
+          <label style={labelStyle}>TPM Limit</label>
+          <input placeholder="—" value={tpm} onChange={e => setTpm(e.target.value)} style={inputStyle} type="number" />
+        </div>
+      </div>
+
+      {type !== "local" && (
+        <div>
+          <label style={labelStyle}>API Key {preset.keyHint && <span style={{ color: "var(--text-secondary)", fontSize: 11 }}>hint: {preset.keyHint}</span>}</label>
+          <input placeholder="paste API key (optional, can add later)" value={apiKey} onChange={e => setApiKey(e.target.value)} style={inputStyle} type="password" />
+        </div>
+      )}
+
+      {error && <div style={{ color: "var(--danger)", fontSize: 13, marginTop: 8 }}>{error}</div>}
+
+      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+        <button onClick={submit} style={btnStyle}>Create Provider</button>
+        <button onClick={() => selectPreset(0)} style={{ ...btnStyle, background: "var(--badge-bg)", color: "var(--text)" }}>Reset</button>
+      </div>
     </div>
   );
 }
@@ -578,6 +730,10 @@ function App() {
 }
 
 // ── Styles ──
+
+const labelStyle: React.CSSProperties = {
+  fontSize: 13, color: "var(--text-secondary)", display: "block", marginBottom: 4,
+};
 
 const inputStyle: React.CSSProperties = {
   display: "block", width: "100%", padding: "8px", margin: "8px 0",

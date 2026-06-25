@@ -578,7 +578,7 @@ export class TokenPoolServer {
 
     // ── OAuth ──
 
-    // Start OAuth flow for a provider (device or web depending on config)
+    // Start OAuth flow for a provider (routes based on flow type)
     this.fastify.post("/v1/admin/oauth/:provider/start", adminGuard, async (request, reply) => {
       const provider = (request.params as any).provider as string;
       const body = request.body as any;
@@ -588,22 +588,15 @@ export class TokenPoolServer {
           this.oauth.storeRawToken(provider, body.token, body?.scope);
           return reply.send({ success: true });
         }
-        // Check if this provider uses web flow
-        const flowType = this.oauth.getFlowType(provider);
-        if (flowType === "web") {
-          const redirectUri = body?.redirectUri ?? `http://localhost:18080/v1/admin/oauth/${provider}/callback`;
-          const result = this.oauth.startWebFlow(provider, redirectUri);
-          return reply.send(result);
-        }
-        // Default: device flow
-        const result = await this.oauth.startDeviceFlow(provider);
+        // Use the dispatcher to route to the correct flow
+        const result = await this.oauth.startFlow(provider, body);
         return reply.send(result);
       } catch (err: any) {
         return reply.code(400).send({ error: { message: err.message, type: "oauth_error", code: null } });
       }
     });
 
-    // Poll device flow for a provider
+    // Poll device flow for a provider (standard, MiniMax, Kiro)
     this.fastify.get("/v1/admin/oauth/:provider/poll", adminGuard, async (request, reply) => {
       const provider = (request.params as any).provider as string;
       const deviceCode = (request.query as any)?.device_code as string;
@@ -611,7 +604,24 @@ export class TokenPoolServer {
         return reply.code(400).send({ error: { message: "device_code query parameter required", type: "invalid_request", code: null } });
       }
       try {
-        const result = await this.oauth.pollDeviceFlow(provider, deviceCode);
+        const result = await this.oauth.pollFlow(provider, deviceCode);
+        return reply.send(result);
+      } catch (err: any) {
+        return reply.code(400).send({ error: { message: err.message, type: "oauth_error", code: null } });
+      }
+    });
+
+    // Exchange authorization code manually (Anthropic paste, PKCE redirect fallback)
+    this.fastify.post("/v1/admin/oauth/:provider/exchange", adminGuard, async (request, reply) => {
+      const provider = (request.params as any).provider as string;
+      const body = request.body as any;
+      const code = body?.code as string;
+      const state = body?.state as string | undefined;
+      if (!code) {
+        return reply.code(400).send({ error: { message: "code is required in request body", type: "invalid_request", code: null } });
+      }
+      try {
+        const result = await this.oauth.exchangeCodeManual(provider, code, state);
         return reply.send(result);
       } catch (err: any) {
         return reply.code(400).send({ error: { message: err.message, type: "oauth_error", code: null } });

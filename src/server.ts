@@ -1,6 +1,9 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
+import fastifyStatic from "@fastify/static";
 import { randomBytes } from "crypto";
+import { existsSync } from "fs";
+import { join } from "path";
 import { loadConfig, type AppConfig } from "@/config";
 import { DatabaseService } from "@/db";
 import { CryptoService } from "@/auth/crypto";
@@ -88,6 +91,20 @@ export class TokenPoolServer {
     await this.fastify.register(cors, { origin: true });
     registerAuth(this.fastify, this.config.appSecret);
     setupAuthGuards(this.fastify, this.users);
+
+    // Serve WebUI if built
+    const webDir = join(__dirname, "web", "dist");
+    if (existsSync(webDir)) {
+      await this.fastify.register(fastifyStatic, {
+        root: webDir,
+        prefix: "/ui/",
+        decorateReply: false,
+      });
+      // SPA fallback: /ui/* → index.html
+      this.fastify.get("/ui", async (_req, reply) => {
+        return reply.sendFile("index.html");
+      });
+    }
   }
 
   private registerRoutes() {

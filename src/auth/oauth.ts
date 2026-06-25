@@ -67,23 +67,35 @@ interface OAuthProviderConfig {
 }
 
 const PROVIDER_CONFIGS: Record<string, OAuthProviderConfig> = {
-  // GitHub Copilot — device flow
+  // GitHub Copilot — token paste flow (user provides GitHub OAuth/PAT token,
+  // which is exchanged for a Copilot API token at runtime)
   "github-copilot": {
+    flowType: "device", // kept as "device" for UI routing; actual impl uses token paste
+    clientId: "Iv1.b507a76440c95a4c",
+    scope: "read:user",
+    deviceCodeUrl: "https://github.com/login/device/code",
+    tokenUrl: "https://github.com/login/oauth/access_token",
+  },
+  "copilot": {
     flowType: "device",
     clientId: "Iv1.b507a76440c95a4c",
     scope: "read:user",
     deviceCodeUrl: "https://github.com/login/device/code",
     tokenUrl: "https://github.com/login/oauth/access_token",
   },
-  // Google / Gemini — web flow
+  // Google / Gemini — web flow (requires user to register OAuth app)
   "google": {
     flowType: "web",
+    clientId: process.env.GOOGLE_OAUTH_CLIENT_ID ?? "",
+    clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET ?? "",
     scope: "https://www.googleapis.com/auth/generative-language.retriever",
     authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
     tokenUrl: "https://oauth2.googleapis.com/token",
   },
   "gemini": {
     flowType: "web",
+    clientId: process.env.GOOGLE_OAUTH_CLIENT_ID ?? "",
+    clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET ?? "",
     scope: "https://www.googleapis.com/auth/generative-language.retriever",
     authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
     tokenUrl: "https://oauth2.googleapis.com/token",
@@ -233,6 +245,9 @@ export class OAuthService {
     if (!config.authorizeUrl) {
       throw new Error(`Provider '${providerName}' is missing authorize URL configuration`);
     }
+    if (!config.clientId) {
+      throw new Error(`Provider '${providerName}' requires GOOGLE_OAUTH_CLIENT_ID env var. Register an OAuth app at https://console.cloud.google.com/apis/credentials and set GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET.`);
+    }
 
     const state = randomBytes(16).toString("hex");
     this.pendingWebFlows.set(state, {
@@ -320,6 +335,24 @@ export class OAuthService {
   }
 
   // ── Token management ──
+
+  /**
+   * Store a raw token (e.g. GitHub PAT or pasted OAuth token) for a provider.
+   * Used for providers that don't support device/web flow but accept pasted tokens.
+   */
+  storeRawToken(providerName: string, accessToken: string, scope?: string): void {
+    const provider = this.providers.getByName(providerName);
+    if (!provider) {
+      throw new Error(`Provider '${providerName}' not found`);
+    }
+    this.storeToken({
+      providerId: provider.id,
+      accessToken,
+      refreshToken: "",
+      expiresAt: "",
+      scope: scope ?? "",
+    });
+  }
 
   async refreshToken(providerName: string, providerId: number): Promise<string> {
     const config = this.getConfig(providerName);
@@ -423,6 +456,11 @@ export class OAuthService {
   }
 
   // ── Internal helpers ──
+
+  getFlowType(providerName: string): FlowType {
+    const config = this.getConfig(providerName);
+    return config.flowType;
+  }
 
   private getConfig(providerName: string): OAuthProviderConfig {
     // Try exact match first

@@ -578,10 +578,24 @@ export class TokenPoolServer {
 
     // ── OAuth ──
 
-    // Start device flow for a provider
+    // Start OAuth flow for a provider (device or web depending on config)
     this.fastify.post("/v1/admin/oauth/:provider/start", adminGuard, async (request, reply) => {
       const provider = (request.params as any).provider as string;
+      const body = request.body as any;
       try {
+        // If body has a token, store it directly (token paste flow)
+        if (body?.token) {
+          this.oauth.storeRawToken(provider, body.token, body?.scope);
+          return reply.send({ success: true });
+        }
+        // Check if this provider uses web flow
+        const flowType = this.oauth.getFlowType(provider);
+        if (flowType === "web") {
+          const redirectUri = body?.redirectUri ?? `http://localhost:18080/v1/admin/oauth/${provider}/callback`;
+          const result = this.oauth.startWebFlow(provider, redirectUri);
+          return reply.send(result);
+        }
+        // Default: device flow
         const result = await this.oauth.startDeviceFlow(provider);
         return reply.send(result);
       } catch (err: any) {

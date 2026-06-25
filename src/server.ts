@@ -7,6 +7,7 @@ import { CryptoService } from "@/auth/crypto";
 import { ProviderService } from "@/providers";
 import { ProviderProxy, ProxyError } from "@/providers/proxy";
 import { RateLimitGuard } from "@/providers/rate-limiter";
+import { FusionService } from "@/fusion";
 import { classifyRequest, estimateTokens } from "@/router/classify";
 import { resolveTierModel, getFallbackChain, type ResolvedModel } from "@/router/resolve";
 import type { ChatCompletionRequest, ChatCompletionResponse } from "@/types";
@@ -18,6 +19,7 @@ export class TokenPoolServer {
   private providers: ProviderService;
   private proxy: ProviderProxy;
   private guard: RateLimitGuard;
+  private fusion: FusionService;
   private config: AppConfig;
 
   constructor() {
@@ -29,6 +31,7 @@ export class TokenPoolServer {
     this.providers = new ProviderService(this.db);
     this.proxy = new ProviderProxy(this.providers, this.crypto);
     this.guard = new RateLimitGuard(this.db, this.providers);
+    this.fusion = new FusionService(this.db);
 
     this.fastify = Fastify({ logger: true });
   }
@@ -325,6 +328,51 @@ export class TokenPoolServer {
       for (const m of models) {
         stmt.run(tierRow.id, m.modelId, m.providerId, m.priority);
       }
+      return { ok: true };
+    });
+
+    // Fusion pools
+    this.fastify.get("/v1/admin/fusion-pools", async () => {
+      return this.fusion.list();
+    });
+
+    this.fastify.post("/v1/admin/fusion-pools", async (request, reply) => {
+      const body = request.body as any;
+      try {
+        const id = this.fusion.create(
+          body.name,
+          body.arbiterStrategy ?? "best_of_n",
+          body.arbiterModelId,
+        );
+        return reply.code(201).send({ id });
+      } catch (err: any) {
+        return reply.code(400).send({ error: { message: err.message, type: "invalid_request", code: null } });
+      }
+    });
+
+    this.fastify.put("/v1/admin/fusion-pools/:id", async (request, reply) => {
+      const id = parseInt((request.params as any).id, 10);
+      const body = request.body as any;
+      const ok = this.fusion.update(id, body);
+      return ok ? reply.send({ ok }) : reply.code(404).send({ error: { message: "not found", type: "not_found", code: null } });
+    });
+
+    this.fastify.delete("/v1/admin/fusion-pools/:id", async (request, reply) => {
+      const id = parseInt((request.params as any).id, 10);
+      const ok = this.fusion.delete(id);
+      return ok ? reply.send({ ok }) : reply.code(404).send({ error: { message: "not found", type: "not_found", code: null } });
+    });
+
+    this.fastify.get("/v1/admin/fusion-pools/:id/members", async (request) => {
+      const id = parseInt((request.params as any).id, 10);
+      return this.fusion.listMembers(id);
+    });
+
+    this.fastify.put("/v1/admin/fusion-pools/:id/members", async (request, reply) => {
+      const id = parseInt((request.params as any).id, 10);
+      if (!this.fusion.get(id)) return reply.code(404).send({ error: { message: "not found", type: "not_found", code: null } });
+      const members = request.body as Array<{ modelId: string; providerId: number; position: number }>;
+      this.fusion.setMembers(id, members);
       return { ok: true };
     });
 

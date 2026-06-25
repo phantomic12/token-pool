@@ -88,16 +88,16 @@ interface OAuthProviderConfig {
 }
 
 const MINIMAX_INTERNATIONAL_BASE = "https://api.minimax.io";
-const MINIMAX_CHINA_BASE = "https://api.minimax.chat";
+const MINIMAX_CHINA_BASE = "https://api.minimaxi.com";
 
 const KIRO_BASE_URL = "https://oidc.us-east-1.amazonaws.com";
-const KIRO_START_URL = "https://view.kiro.dev";
+const KIRO_START_URL = "https://view.awsapps.com/start";
 const KIRO_SCOPES = [
-  "coderepo:read", "coderepo:write",
-  "codegen:read", "codegen:write",
-  "payment:read", "payment:write",
-  "sso:account",
-  "codereview:read", "codereview:write",
+  "codewhisperer:completions",
+  "codewhisperer:analysis",
+  "codewhisperer:conversations",
+  "codewhisperer:taskassist",
+  "codewhisperer:transformations",
 ];
 
 const PROVIDER_CONFIGS: Record<string, OAuthProviderConfig> = {
@@ -138,15 +138,15 @@ const PROVIDER_CONFIGS: Record<string, OAuthProviderConfig> = {
     flowType: "minimax_device",
     clientId: "78257093-7e40-4613-99e0-527b14b39113",
     scope: "group_id profile model.completion",
-    tokenUrl: `${MINIMAX_INTERNATIONAL_BASE}/oauth2/token`,
-    deviceCodeUrl: `${MINIMAX_INTERNATIONAL_BASE}/oauth2/code`,
+    tokenUrl: `${MINIMAX_INTERNATIONAL_BASE}/oauth/token`,
+    deviceCodeUrl: `${MINIMAX_INTERNATIONAL_BASE}/oauth/code`,
     minimaxRegion: "international",
   },
   // Kiro — AWS SSO OIDC device flow (dynamic client registration)
   "kiro": {
     flowType: "kiro_device",
-    tokenUrl: `${KIRO_BASE_URL}/oidc/token`,
-    deviceCodeUrl: `${KIRO_BASE_URL}/oidc/device/authorization`,
+    tokenUrl: `${KIRO_BASE_URL}/token`,
+    deviceCodeUrl: `${KIRO_BASE_URL}/device_authorization`,
     kiroStartUrl: KIRO_START_URL,
     kiroScopes: KIRO_SCOPES,
   },
@@ -658,7 +658,7 @@ export class OAuthService {
     }
 
     // Step 1: Dynamic client registration
-    const registerResp = await fetch(`${KIRO_BASE_URL}/oidc/client/register`, {
+    const registerResp = await fetch(`${KIRO_BASE_URL}/client/register`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

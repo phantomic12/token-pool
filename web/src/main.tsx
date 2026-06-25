@@ -2,8 +2,65 @@ import React, { useState, useEffect, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, Legend,
+  PieChart, Pie, Cell, Legend, AreaChart, Area,
 } from "recharts";
+
+// ── Theme bootstrap (must run before first paint) ──
+
+const themeStyle = `
+:root {
+  --bg: #f5f5f5;
+  --surface: #fff;
+  --text: #1a1a1a;
+  --text-secondary: #666;
+  --border: #e0e0e0;
+  --accent: #4285f4;
+  --success: #2d5;
+  --danger: #d33;
+  --badge-bg: #f0f0f0;
+}
+:root.dark {
+  --bg: #1a1a2e;
+  --surface: #16213e;
+  --text: #eee;
+  --text-secondary: #999;
+  --border: #333;
+  --accent: #4285f4;
+  --success: #2d5;
+  --danger: #e55;
+  --badge-bg: #2a2a4a;
+}
+body { background: var(--bg); color: var(--text); margin: 0; }
+* { box-sizing: border-box; }
+`;
+
+// Inject the style element + apply theme class before React renders
+const styleEl = document.createElement("style");
+styleEl.textContent = themeStyle;
+document.head.appendChild(styleEl);
+
+if (localStorage.getItem("theme") === "dark") {
+  document.documentElement.classList.add("dark");
+}
+
+function useTheme() {
+  const [theme, setTheme] = useState<"light" | "dark">(
+    document.documentElement.classList.contains("dark") ? "dark" : "light"
+  );
+  const toggle = useCallback(() => {
+    setTheme(prev => {
+      const next = prev === "dark" ? "light" : "dark";
+      localStorage.setItem("theme", next);
+      if (next === "dark") {
+        document.documentElement.classList.add("dark");
+      } else {
+        document.documentElement.classList.remove("dark");
+      }
+      return next;
+    });
+  }, []);
+  return { theme, toggle };
+}
 
 // ── API helper ──
 
@@ -49,7 +106,7 @@ function Login({ onLogin }: { onLogin: () => void }) {
       <form onSubmit={submit}>
         <input placeholder="username" value={username} onChange={e => setUsername(e.target.value)} style={inputStyle} />
         <input type="password" placeholder="password" value={password} onChange={e => setPassword(e.target.value)} style={inputStyle} />
-        {error && <div style={{ color: "red" }}>{error}</div>}
+        {error && <div style={{ color: "var(--danger)" }}>{error}</div>}
         <button type="submit" style={btnStyle}>Login</button>
       </form>
     </div>
@@ -98,17 +155,17 @@ function Providers() {
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-        <h2 style={{ margin: 0 }}>Providers ({providers.length})</h2>
+        <h2 style={{ margin: 0, color: "var(--text)" }}>Providers ({providers.length})</h2>
         <button onClick={() => setShowAdd(!showAdd)} style={btnStyle}>{showAdd ? "Cancel" : "Add Provider"}</button>
       </div>
       {/* Category filter bar */}
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        <button onClick={() => setFilter("all")} style={{ ...filterBtn, background: filter === "all" ? "#444" : "#222", color: filter === "all" ? "#fff" : "#888" }}>All ({providers.length})</button>
+        <button onClick={() => setFilter("all")} style={{ ...filterBtn, background: filter === "all" ? "var(--accent)" : "var(--badge-bg)", color: filter === "all" ? "#fff" : "var(--text-secondary)" }}>All ({providers.length})</button>
         {CATEGORIES.map(c => {
           const count = providers.filter(p => p.type === c.key).length;
           if (count === 0) return null;
           return (
-            <button key={c.key} onClick={() => setFilter(c.key)} style={{ ...filterBtn, background: filter === c.key ? c.color : "#222", color: filter === c.key ? "#000" : "#888" }}>
+            <button key={c.key} onClick={() => setFilter(c.key)} style={{ ...filterBtn, background: filter === c.key ? c.color : "var(--badge-bg)", color: filter === c.key ? "#000" : "var(--text-secondary)" }}>
               {c.label} ({count})
             </button>
           );
@@ -123,20 +180,20 @@ function Providers() {
           <div key={cat.key} style={{ marginBottom: 24 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
               <span style={{ width: 8, height: 8, borderRadius: "50%", background: cat.color, display: "inline-block" }} />
-              <h3 style={{ margin: 0, fontSize: 14, color: "#aaa", textTransform: "uppercase", letterSpacing: 1 }}>{cat.label}</h3>
-              <span style={{ fontSize: 12, color: "#666" }}>({items.length})</span>
+              <h3 style={{ margin: 0, fontSize: 14, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: 1 }}>{cat.label}</h3>
+              <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>({items.length})</span>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }}>
               {items.map(p => (
                 <div key={p.id} style={cardStyle}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <strong>{p.name}</strong>
-                    <span style={{ fontSize: 12, padding: "2px 8px", borderRadius: 4, background: p.enabled ? "#2d5" : "#d33", color: "#fff" }}>
+                    <strong style={{ color: "var(--text)" }}>{p.name}</strong>
+                    <span style={{ fontSize: 12, padding: "2px 8px", borderRadius: 4, background: p.enabled ? "var(--success)" : "var(--danger)", color: "#fff" }}>
                       {p.enabled ? "enabled" : "disabled"}
                     </span>
                   </div>
-                  <div style={{ fontSize: 13, color: "#888" }}>{p.baseUrl || "(no URL)"}</div>
-                  <div style={{ fontSize: 11, color: "#666", marginTop: 4 }}>
+                  <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>{p.baseUrl || "(no URL)"}</div>
+                  <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4 }}>
                     Wire: {p.wireFormat}
                   </div>
                   <div style={{ fontSize: 13, marginTop: 8 }}>
@@ -146,7 +203,7 @@ function Providers() {
                   </div>
                   <div style={{ marginTop: 8 }}>
                     <button onClick={() => toggleEnabled(p)} style={smBtnStyle}>{p.enabled ? "Disable" : "Enable"}</button>
-                    <button onClick={() => del(p.id)} style={{ ...smBtnStyle, color: "red" }}>Delete</button>
+                    <button onClick={() => del(p.id)} style={{ ...smBtnStyle, color: "var(--danger)" }}>Delete</button>
                     <KeysButton providerId={p.id} />
                   </div>
                 </div>
@@ -186,11 +243,11 @@ function KeysButton({ providerId }: { providerId: number }) {
     <>
       <button onClick={() => { setShow(!show); if (!show) load(); }} style={smBtnStyle}>Keys</button>
       {show && (
-        <div style={{ marginTop: 8, padding: 8, background: "#f5f5f5", borderRadius: 4 }}>
+        <div style={{ marginTop: 8, padding: 8, background: "var(--badge-bg)", borderRadius: 4 }}>
           {keys.map(k => (
-            <div key={k.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+            <div key={k.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4, color: "var(--text)" }}>
               <span>{k.label} (pos {k.rrPosition})</span>
-              <button onClick={() => del(k.id)} style={{ color: "red", border: "none", cursor: "pointer" }}>×</button>
+              <button onClick={() => del(k.id)} style={{ color: "var(--danger)", border: "none", cursor: "pointer" }}>×</button>
             </div>
           ))}
           <div style={{ marginTop: 8 }}>
@@ -257,19 +314,19 @@ function Tiers() {
 
   return (
     <div>
-      <h2>Routing Tiers</h2>
+      <h2 style={{ color: "var(--text)" }}>Routing Tiers</h2>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16 }}>
         {tiers.map(t => (
           <div key={t.id} style={cardStyle}>
-            <strong>{t.name}</strong>
-            <div style={{ fontSize: 13, color: "#888" }}>{t.description}</div>
-            <div style={{ marginTop: 8, fontSize: 13 }}>
+            <strong style={{ color: "var(--text)" }}>{t.name}</strong>
+            <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>{t.description}</div>
+            <div style={{ marginTop: 8, fontSize: 13, color: "var(--text)" }}>
               {models[t.name]?.length > 0 ? (
                 models[t.name].map((m: any, i: number) => (
                   <div key={i}>{m.priority}. {m.model_id} (provider {m.provider_id})</div>
                 ))
               ) : (
-                <div style={{ color: "#aaa" }}>No models configured</div>
+                <div style={{ color: "var(--text-secondary)" }}>No models configured</div>
               )}
             </div>
           </div>
@@ -281,68 +338,179 @@ function Tiers() {
 
 // ── Stats ──
 
+const PIE_COLORS = ["#8884d8", "#82ca9d", "#ffc658", "#ff7300", "#e41d3d", "#a8328a", "#327ba8", "#32a85a"];
+
+function StatCard({ title, value, sub, color }: { title: string; value: string; sub?: string; color: string }) {
+  return (
+    <div style={{
+      ...cardStyle,
+      borderTop: `3px solid ${color}`,
+      textAlign: "center" as const,
+    }}>
+      <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: 1, color: "var(--text-secondary)", marginBottom: 4 }}>{title}</div>
+      <div style={{ fontSize: 28, fontWeight: 700, color }}>{value}</div>
+      {sub && <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 4 }}>{sub}</div>}
+    </div>
+  );
+}
+
 function Stats() {
   const [stats, setStats] = useState<any>(null);
+  const [days, setDays] = useState(30);
 
   const load = useCallback(async () => {
-    setStats(await api("/admin/stats?days=30"));
-  }, []);
+    setStats(null);
+    setStats(await api(`/admin/stats?days=${days}`));
+  }, [days]);
 
   useEffect(() => { load(); }, [load]);
 
-  if (!stats) return <div>Loading stats...</div>;
+  if (!stats) return <div style={{ color: "var(--text-secondary)" }}>Loading stats...</div>;
+
+  const total = stats.total || {};
+  const totalRequests = total.count ?? 0;
+  const totalTokens = (total.inputTokens ?? 0) + (total.outputTokens ?? 0);
+  const totalCost = total.totalCost ?? 0;
+  const avgLatency = totalRequests > 0 ? (total.avgLatencyMs ?? total.latencyMs ?? 0) : 0;
 
   const tierData = (stats.byTier || []).map((t: any) => ({ name: t.tier, value: t.count }));
-  const providerData = (stats.byProvider || []).map((p: any) => ({ name: `Provider ${p.providerId}`, count: p.count }));
-  const dailyData = (stats.daily || []).map((d: any) => ({ date: d.date, count: d.count, tokens: (d.inputTokens || 0) + (d.outputTokens || 0) }));
-
-  const COLORS = ["#8884d8", "#82ca9d", "#ffc658", "#ff7300", "#e41d3d"];
+  const dailyData = (stats.daily || []).map((d: any) => ({
+    date: d.date,
+    count: d.count,
+    inputTokens: d.inputTokens || 0,
+    outputTokens: d.outputTokens || 0,
+  }));
+  const providerData = (stats.byProvider || [])
+    .map((p: any) => ({ name: `Provider ${p.providerId}`, count: p.count }))
+    .sort((a: any, b: any) => b.count - a.count)
+    .slice(0, 10);
 
   return (
     <div>
-      <h2>Usage Stats (30 days)</h2>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <h2 style={{ margin: 0, color: "var(--text)" }}>Usage Stats</h2>
+        <div style={{ display: "flex", gap: 8 }}>
+          {[7, 30, 90].map(d => (
+            <button
+              key={d}
+              onClick={() => setDays(d)}
+              style={{
+                ...filterBtn,
+                background: days === d ? "var(--accent)" : "var(--badge-bg)",
+                color: days === d ? "#fff" : "var(--text-secondary)",
+              }}
+            >
+              {d}d
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Summary cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 16 }}>
+        <StatCard title="Total Requests" value={totalRequests.toLocaleString()} color="#4285f4" />
+        <StatCard title="Total Tokens" value={totalTokens.toLocaleString()} sub={`${(total.inputTokens ?? 0).toLocaleString()} in / ${(total.outputTokens ?? 0).toLocaleString()} out`} color="#2d5" />
+        <StatCard title="Avg Latency" value={avgLatency > 0 ? `${Math.round(avgLatency)}ms` : "—"} color="#fa0" />
+        <StatCard title="Total Cost" value={`$${totalCost.toFixed(2)}`} color="#a8328a" />
+      </div>
+
+      {/* Daily Requests — Area chart with gradient */}
+      <div style={{ ...cardStyle, marginBottom: 16 }}>
+        <h3 style={{ margin: "0 0 12px", color: "var(--text)" }}>Daily Requests</h3>
+        <ResponsiveContainer width="100%" height={280}>
+          <AreaChart data={dailyData}>
+            <defs>
+              <linearGradient id="reqGradient" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="#4285f4" stopOpacity={0.6} />
+                <stop offset="100%" stopColor="#4285f4" stopOpacity={0.05} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+            <XAxis dataKey="date" stroke="var(--text-secondary)" fontSize={12} />
+            <YAxis stroke="var(--text-secondary)" fontSize={12} />
+            <Tooltip
+              contentStyle={{
+                background: "var(--surface)",
+                border: `1px solid var(--border)`,
+                borderRadius: 4,
+                color: "var(--text)",
+              }}
+            />
+            <Area type="monotone" dataKey="count" stroke="#4285f4" strokeWidth={2} fill="url(#reqGradient)" name="Requests" />
+          </AreaChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Daily Token Usage — stacked bar */}
+      <div style={{ ...cardStyle, marginBottom: 16 }}>
+        <h3 style={{ margin: "0 0 12px", color: "var(--text)" }}>Daily Token Usage</h3>
+        <ResponsiveContainer width="100%" height={280}>
+          <BarChart data={dailyData}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+            <XAxis dataKey="date" stroke="var(--text-secondary)" fontSize={12} />
+            <YAxis stroke="var(--text-secondary)" fontSize={12} />
+            <Tooltip
+              contentStyle={{
+                background: "var(--surface)",
+                border: `1px solid var(--border)`,
+                borderRadius: 4,
+                color: "var(--text)",
+              }}
+            />
+            <Legend wrapperStyle={{ color: "var(--text)" }} />
+            <Bar dataKey="inputTokens" stackId="tokens" fill="#4285f4" name="Input Tokens" />
+            <Bar dataKey="outputTokens" stackId="tokens" fill="#2d5" name="Output Tokens" />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Two-column: Pie (by tier) + Horizontal bar (by provider) */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
+        {/* Requests by Tier — Pie */}
         <div style={cardStyle}>
-          <h3>By Tier</h3>
-          <ResponsiveContainer width="100%" height={250}>
+          <h3 style={{ margin: "0 0 12px", color: "var(--text)" }}>Requests by Tier</h3>
+          <ResponsiveContainer width="100%" height={300}>
             <PieChart>
-              <Pie data={tierData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label>
-                {tierData.map((_: any, i: number) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+              <Pie data={tierData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={90} label={{ fill: "var(--text)", fontSize: 12 }}>
+                {tierData.map((_: any, i: number) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
               </Pie>
-              <Tooltip />
-              <Legend />
+              <Tooltip
+                contentStyle={{
+                  background: "var(--surface)",
+                  border: `1px solid var(--border)`,
+                  borderRadius: 4,
+                  color: "var(--text)",
+                }}
+              />
+              <Legend wrapperStyle={{ color: "var(--text)" }} />
             </PieChart>
           </ResponsiveContainer>
         </div>
 
+        {/* Requests by Provider — Horizontal bar */}
         <div style={cardStyle}>
-          <h3>By Provider</h3>
-          <ResponsiveContainer width="100%" height={250}>
-            <BarChart data={providerData}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="name" />
-              <YAxis />
-              <Tooltip />
-              <Bar dataKey="count" fill="#8884d8" />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-
-        <div style={{ ...cardStyle, gridColumn: "1 / -1" }}>
-          <h3>Daily Requests</h3>
-          <ResponsiveContainer width="100%" height={250}>
-            <BarChart data={dailyData}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="date" />
-              <YAxis />
-              <Tooltip />
-              <Bar dataKey="count" fill="#82ca9d" />
+          <h3 style={{ margin: "0 0 12px", color: "var(--text)" }}>Requests by Provider (Top 10)</h3>
+          <ResponsiveContainer width="100%" height={300}>
+            <BarChart data={providerData} layout="vertical" margin={{ left: 20, right: 20 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
+              <XAxis type="number" stroke="var(--text-secondary)" fontSize={12} />
+              <YAxis type="category" dataKey="name" stroke="var(--text-secondary)" fontSize={12} width={100} />
+              <Tooltip
+                contentStyle={{
+                  background: "var(--surface)",
+                  border: `1px solid var(--border)`,
+                  borderRadius: 4,
+                  color: "var(--text)",
+                }}
+              />
+              <Bar dataKey="count" fill="#8884d8" name="Requests" radius={[0, 4, 4, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
       </div>
-      <div style={{ marginTop: 16 }}>
-        <a href="/v1/admin/stats/export?days=30" target="_blank">
+
+      <div style={{ marginTop: 8 }}>
+        <a href={`/v1/admin/stats/export?days=${days}`} target="_blank">
           <button style={btnStyle}>Export CSV</button>
         </a>
       </div>
@@ -355,6 +523,7 @@ function Stats() {
 function App() {
   const [logged, setLogged] = useState(!!getToken());
   const [tab, setTab] = useState("providers");
+  const { theme, toggle } = useTheme();
 
   if (!logged) return <Login onLogin={() => setLogged(true)} />;
 
@@ -364,12 +533,26 @@ function App() {
   };
 
   return (
-    <div style={{ fontFamily: "system-ui, sans-serif", maxWidth: 1200, margin: "0 auto", padding: 20 }}>
+    <div style={{ fontFamily: "system-ui, sans-serif", maxWidth: 1200, margin: "0 auto", padding: 20, background: "var(--bg)", color: "var(--text)", minHeight: "100vh" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <h1>token-pool</h1>
-        <button onClick={logout} style={btnStyle}>Logout</button>
+        <h1 style={{ color: "var(--text)" }}>token-pool</h1>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button
+            onClick={toggle}
+            style={{
+              ...smBtnStyle,
+              fontSize: 18,
+              padding: "4px 10px",
+              lineHeight: 1,
+            }}
+            title="Toggle dark mode"
+          >
+            {theme === "dark" ? "☀️" : "🌙"}
+          </button>
+          <button onClick={logout} style={btnStyle}>Logout</button>
+        </div>
       </div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 20, borderBottom: "2px solid #eee" }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 20, borderBottom: "2px solid var(--border)" }}>
         {[["providers", "Providers"], ["tiers", "Tiers"], ["stats", "Stats"]].map(([key, label]) => (
           <button
             key={key}
@@ -377,8 +560,8 @@ function App() {
             style={{
               padding: "8px 16px",
               border: "none",
-              background: tab === key ? "#333" : "transparent",
-              color: tab === key ? "#fff" : "#333",
+              background: tab === key ? "var(--accent)" : "transparent",
+              color: tab === key ? "#fff" : "var(--text-secondary)",
               cursor: "pointer",
               borderRadius: "4px 4px 0 0",
             }}
@@ -398,26 +581,27 @@ function App() {
 
 const inputStyle: React.CSSProperties = {
   display: "block", width: "100%", padding: "8px", margin: "8px 0",
-  border: "1px solid #ddd", borderRadius: 4, boxSizing: "border-box",
+  border: "1px solid var(--border)", borderRadius: 4, boxSizing: "border-box",
+  background: "var(--surface)", color: "var(--text)",
 };
 
 const btnStyle: React.CSSProperties = {
   padding: "8px 16px", border: "none", borderRadius: 4,
-  background: "#333", color: "#fff", cursor: "pointer",
+  background: "var(--accent)", color: "#fff", cursor: "pointer",
 };
 
 const smBtnStyle: React.CSSProperties = {
-  padding: "4px 8px", margin: "0 4px 0 0", border: "1px solid #ddd",
-  borderRadius: 4, background: "#fff", cursor: "pointer", fontSize: 12,
+  padding: "4px 8px", margin: "0 4px 0 0", border: "1px solid var(--border)",
+  borderRadius: 4, background: "var(--surface)", color: "var(--text)", cursor: "pointer", fontSize: 12,
 };
 
 const cardStyle: React.CSSProperties = {
-  padding: 16, border: "1px solid #e0e0e0", borderRadius: 8, background: "#fff",
+  padding: 16, border: "1px solid var(--border)", borderRadius: 8, background: "var(--surface)",
 };
 
 const badgeStyle: React.CSSProperties = {
   display: "inline-block", padding: "2px 6px", margin: "0 4px 2px 0",
-  background: "#f0f0f0", borderRadius: 4, fontSize: 12,
+  background: "var(--badge-bg)", color: "var(--text)", borderRadius: 4, fontSize: 12,
 };
 
 const filterBtn: React.CSSProperties = {

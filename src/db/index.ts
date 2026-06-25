@@ -105,6 +105,16 @@ CREATE TABLE IF NOT EXISTS rate_limit_state (
   tokens_used INTEGER NOT NULL DEFAULT 0,
   UNIQUE(key_id, window_type, window_start)
 );
+
+CREATE TABLE IF NOT EXISTS oauth_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+  access_token TEXT NOT NULL,
+  refresh_token TEXT,
+  expires_at TEXT,
+  scope TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `;
 
 const SEED_TIERS = [
@@ -175,6 +185,7 @@ export class DatabaseService {
     this.db.exec(SCHEMA);
     this.migrate();
     this.seedDefaults();
+    this.postSeedMigrate();
   }
 
   private migrate() {
@@ -212,6 +223,12 @@ export class DatabaseService {
         )
       `);
     }
+  }
+
+  /** Runs after seed to fix categories that INSERT OR IGNORE skipped */
+  private postSeedMigrate() {
+    // Ensure local providers have correct category even if they existed before
+    this.db.exec("UPDATE providers SET type = 'local' WHERE name IN ('ollama', 'llamacpp', 'lmstudio') AND type = 'free'");
   }
 
   private seedDefaults() {

@@ -20,6 +20,7 @@ import { FusionEngine, FusionError } from "@/fusion/engine";
 import { UserService } from "@/auth/user-service";
 import { registerAuth, setupAuthGuards, signToken, type JwtPayload } from "@/auth/middleware";
 import { UsageTracker } from "@/stats";
+import { OAuthService } from "@/auth/oauth";
 import { classifyRequest, estimateTokens } from "@/router/classify";
 import { resolveTierModel, getFallbackChain, type ResolvedModel } from "@/router/resolve";
 import type { ChatCompletionRequest, ChatCompletionResponse } from "@/types";
@@ -36,6 +37,7 @@ export class TokenPoolServer {
   private modelSync: ModelMetadataSync;
   private users: UserService;
   private usage: UsageTracker;
+  private oauth: OAuthService;
   private config: AppConfig;
 
   constructor() {
@@ -52,6 +54,7 @@ export class TokenPoolServer {
     this.modelSync = new ModelMetadataSync(this.providers, this.config.modelsRefreshIntervalSec);
     this.users = new UserService(this.db);
     this.usage = new UsageTracker(this.db);
+    this.oauth = new OAuthService(this.db, this.crypto, this.providers);
 
     this.fastify = Fastify({ logger: true });
   }
@@ -570,6 +573,71 @@ export class TokenPoolServer {
     this.fastify.delete("/v1/admin/users/:id", adminGuard, async (request, reply) => {
       const id = parseInt((request.params as any).id, 10);
       const ok = this.users.delete(id);
+      return ok ? reply.send({ ok }) : reply.code(404).send({ error: { message: "not found", type: "not_found", code: null } });
+    });
+
+    // ── OAuth ──
+
+    // Start device flow for a provider
+    this.fastify.post("/v1/admin/oauth/:provider/start", adminGuard, async (request, reply) => {
+      const provider = (request.params as any).provider as string;
+      try {
+        const result = await this.oauth.startDeviceFlow(provider);
+        return reply.send(result);
+      } catch (err: any) {
+        return reply.code(400).send({ error: { message: err.message, type: "oauth_error", code: null } });
+      }
+    });
+
+    // Poll device flow for a provider
+    this.fastify.get("/v1/admin/oauth/:provider/poll", adminGuard, async (request, reply) => {
+      const provider = (request.params as any).provider as string;
+      const deviceCode = (request.query as any)?.device_code as string;
+      if (!deviceCode) {
+        return reply.code(400).send({ error: { message: "device_code query parameter required", type: "invalid_request", code: null } });
+      }
+      try {
+        const result = await this.oauth.pollDeviceFlow(provider, deviceCode);
+        return reply.send(result);
+      } catch (err: any) {
+        return reply.code(400).send({ error: { message: err.message, type: "oauth_error", code: null } });
+      }
+    });
+
+    // Web flow callback
+    this.fastify.get("/v1/admin/oauth/:provider/callback", adminGuard, async (request, reply) => {
+      const provider = (request.params as any).provider as string;
+      const query = request.query as any;
+      const code = query?.code as string;
+      const state = query?.state as string;
+
+      if (!code || !state) {
+        return reply.code(400).send({ error: { message: "code and state query parameters required", type: "invalid_request", code: null } });
+      }
+
+      // Validate state
+      const pending = this.oauth.consumeState(state);
+      if (!pending) {
+        return reply.code(400).send({ error: { message: "Invalid or expired state parameter", type: "oauth_error", code: null } });
+      }
+
+      try {
+        const result = await this.oauth.exchangeCode(pending.providerName, code, pending.redirectUri);
+        return reply.send(result);
+      } catch (err: any) {
+        return reply.code(400).send({ error: { message: err.message, type: "oauth_error", code: null } });
+      }
+    });
+
+    // List connected OAuth tokens (masked)
+    this.fastify.get("/v1/admin/oauth/tokens", adminGuard, async () => {
+      return this.oauth.listTokens();
+    });
+
+    // Disconnect a provider's OAuth
+    this.fastify.delete("/v1/admin/oauth/:provider", adminGuard, async (request, reply) => {
+      const provider = (request.params as any).provider as string;
+      const ok = this.oauth.disconnect(provider);
       return ok ? reply.send({ ok }) : reply.code(404).send({ error: { message: "not found", type: "not_found", code: null } });
     });
   }

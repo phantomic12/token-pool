@@ -1,0 +1,14 @@
+node_modules
+dist
+web/node_modules
+web/dist
+src/web/dist
+data
+*.db
+*.db-journal
+*.db-wal
+.git
+.gitignore
+.env
+tests
+web/src

@@ -1,9 +1,7 @@
 node_modules/
 dist/
-*.js
-*.d.ts
-*.js.map
-*.d.ts.map
+web/node_modules/
+src/web/dist/
 data/
 *.db
 *.db-journal

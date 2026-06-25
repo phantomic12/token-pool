@@ -79,7 +79,7 @@ export interface Provider {
   id: number;
   name: string;
   baseUrl: string;
-  type: "free" | "paid";
+  type: "free" | "paid" | "local" | "subscription";
   wireFormat: WireFormat;
   rpmLimit: number | null;
   rpdLimit: number | null;

@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS providers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT UNIQUE NOT NULL,
   base_url TEXT NOT NULL,
-  type TEXT NOT NULL DEFAULT 'free',
+  type TEXT NOT NULL DEFAULT 'free',  -- category: free | paid | local | subscription
   wire_format TEXT NOT NULL DEFAULT 'openai',
   rpm_limit INTEGER,
   rpd_limit INTEGER,
@@ -117,9 +117,9 @@ const SEED_TIERS = [
 
 // Full provider list — wire formats from manifest's provider-endpoints.ts,
 // rate limits from cheahjs/free-llm-api-resources.
-// Fields: name, base_url, type, wire_format, rpm, rpd, tpm, tpd
+// Fields: name, base_url, category, wire_format, rpm, rpd, tpm, tpd
 const SEED_PROVIDERS: [string, string, string, string, number | null, number | null, number | null, number | null][] = [
-  // ── Free providers (cheahjs) ──
+  // ── Free tier (no payment required) ──
   ["openrouter", "https://openrouter.ai/api/v1", "free", "openai", 20, 1000, null, null],
   ["google", "https://generativelanguage.googleapis.com/v1beta/openai", "free", "openai", 15, 1500, 250000, null],
   ["groq", "https://api.groq.com/openai/v1", "free", "openai", 30, 1000, 12000, 100000],
@@ -132,7 +132,7 @@ const SEED_PROVIDERS: [string, string, string, string, number | null, number | n
   ["nvidia", "https://integrate.api.nvidia.com/v1", "free", "openai", 40, null, null, null],
   ["sambanova", "https://api.sambanova.ai/v1", "free", "openai", null, null, null, null],
 
-  // ── Paid providers (manifest) ──
+  // ── Paid (commercial, pay-per-use) ──
   ["openai", "https://api.openai.com/v1", "paid", "openai", null, null, null, null],
   ["anthropic", "https://api.anthropic.com", "paid", "anthropic", null, null, null, null],
   ["deepseek", "https://api.deepseek.com/v1", "paid", "openai", null, null, null, null],
@@ -147,10 +147,10 @@ const SEED_PROVIDERS: [string, string, string, string, number | null, number | n
   ["byteplus", "https://ark.ap-southeast.bytepluses.com/api/coding/v3", "paid", "openai", null, null, null, null],
   ["commandcode", "https://api.commandcode.ai/provider/v1", "paid", "openai", null, null, null, null],
 
-  // ── Local providers ──
-  ["ollama", "http://localhost:11434/v1", "free", "openai", null, null, null, null],
-  ["llamacpp", "http://localhost:8080/v1", "free", "openai", null, null, null, null],
-  ["lmstudio", "http://localhost:1234/v1", "free", "openai", null, null, null, null],
+  // ── Local (self-hosted inference) ──
+  ["ollama", "http://localhost:11434/v1", "local", "openai", null, null, null, null],
+  ["llamacpp", "http://localhost:8080/v1", "local", "openai", null, null, null, null],
+  ["lmstudio", "http://localhost:1234/v1", "local", "openai", null, null, null, null],
 ];
 
 // Migration: add wire_format column to existing providers table if missing
@@ -183,6 +183,9 @@ export class DatabaseService {
     if (!cols.some(c => c.name === "wire_format")) {
       this.db.exec(MIGRATION_ADD_WIRE_FORMAT);
     }
+
+    // Migrate local providers from "free" to "local" category
+    this.db.exec("UPDATE providers SET type = 'local' WHERE name IN ('ollama', 'llamacpp', 'lmstudio') AND type = 'free'");
 
     // Check if models table has UNIQUE constraint on (provider_id, model_id)
     // SQLite can't alter constraints in-place, so recreate if missing

@@ -58,9 +58,17 @@ function Login({ onLogin }: { onLogin: () => void }) {
 
 // ── Providers ──
 
+const CATEGORIES: { key: string; label: string; color: string }[] = [
+  { key: "free", label: "Free Tier", color: "#2d5" },
+  { key: "paid", label: "Paid", color: "#59f" },
+  { key: "local", label: "Local", color: "#fa0" },
+  { key: "subscription", label: "Subscription", color: "#c5f" },
+];
+
 function Providers() {
   const [providers, setProviders] = useState<any[]>([]);
   const [showAdd, setShowAdd] = useState(false);
+  const [filter, setFilter] = useState<string>("all");
 
   const load = useCallback(async () => {
     setProviders(await api("/admin/providers"));
@@ -79,34 +87,74 @@ function Providers() {
     load();
   };
 
+  const filtered = filter === "all" ? providers : providers.filter(p => p.type === filter);
+  const byCategory: Record<string, any[]> = {};
+  for (const p of filtered) {
+    const cat = p.type || "free";
+    if (!byCategory[cat]) byCategory[cat] = [];
+    byCategory[cat].push(p);
+  }
+
   return (
     <div>
-      <h2>Providers ({providers.length})</h2>
-      <button onClick={() => setShowAdd(!showAdd)} style={btnStyle}>{showAdd ? "Cancel" : "Add Provider"}</button>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+        <h2 style={{ margin: 0 }}>Providers ({providers.length})</h2>
+        <button onClick={() => setShowAdd(!showAdd)} style={btnStyle}>{showAdd ? "Cancel" : "Add Provider"}</button>
+      </div>
+      {/* Category filter bar */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        <button onClick={() => setFilter("all")} style={{ ...filterBtn, background: filter === "all" ? "#444" : "#222", color: filter === "all" ? "#fff" : "#888" }}>All ({providers.length})</button>
+        {CATEGORIES.map(c => {
+          const count = providers.filter(p => p.type === c.key).length;
+          if (count === 0) return null;
+          return (
+            <button key={c.key} onClick={() => setFilter(c.key)} style={{ ...filterBtn, background: filter === c.key ? c.color : "#222", color: filter === c.key ? "#000" : "#888" }}>
+              {c.label} ({count})
+            </button>
+          );
+        })}
+      </div>
       {showAdd && <AddProvider onDone={load} />}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16, marginTop: 16 }}>
-        {providers.map(p => (
-          <div key={p.id} style={cardStyle}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <strong>{p.name}</strong>
-              <span style={{ fontSize: 12, padding: "2px 8px", borderRadius: 4, background: p.enabled ? "#2d5" : "#d33", color: "#fff" }}>
-                {p.enabled ? "enabled" : "disabled"}
-              </span>
+      {/* Providers grouped by category */}
+      {CATEGORIES.map(cat => {
+        const items = byCategory[cat.key];
+        if (!items || items.length === 0) return null;
+        return (
+          <div key={cat.key} style={{ marginBottom: 24 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: cat.color, display: "inline-block" }} />
+              <h3 style={{ margin: 0, fontSize: 14, color: "#aaa", textTransform: "uppercase", letterSpacing: 1 }}>{cat.label}</h3>
+              <span style={{ fontSize: 12, color: "#666" }}>({items.length})</span>
             </div>
-            <div style={{ fontSize: 13, color: "#888" }}>{p.baseUrl || "(no URL)"}</div>
-            <div style={{ fontSize: 13, marginTop: 8 }}>
-              <span style={badgeStyle}>RPM: {p.rpmLimit ?? "—"}</span>
-              <span style={badgeStyle}>RPD: {p.rpdLimit ?? "—"}</span>
-              <span style={badgeStyle}>TPM: {p.tpmLimit ?? "—"}</span>
-            </div>
-            <div style={{ marginTop: 8 }}>
-              <button onClick={() => toggleEnabled(p)} style={smBtnStyle}>{p.enabled ? "Disable" : "Enable"}</button>
-              <button onClick={() => del(p.id)} style={{ ...smBtnStyle, color: "red" }}>Delete</button>
-              <KeysButton providerId={p.id} />
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }}>
+              {items.map(p => (
+                <div key={p.id} style={cardStyle}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <strong>{p.name}</strong>
+                    <span style={{ fontSize: 12, padding: "2px 8px", borderRadius: 4, background: p.enabled ? "#2d5" : "#d33", color: "#fff" }}>
+                      {p.enabled ? "enabled" : "disabled"}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 13, color: "#888" }}>{p.baseUrl || "(no URL)"}</div>
+                  <div style={{ fontSize: 11, color: "#666", marginTop: 4 }}>
+                    Wire: {p.wireFormat}
+                  </div>
+                  <div style={{ fontSize: 13, marginTop: 8 }}>
+                    <span style={badgeStyle}>RPM: {p.rpmLimit ?? "—"}</span>
+                    <span style={badgeStyle}>RPD: {p.rpdLimit ?? "—"}</span>
+                    <span style={badgeStyle}>TPM: {p.tpmLimit ?? "—"}</span>
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <button onClick={() => toggleEnabled(p)} style={smBtnStyle}>{p.enabled ? "Disable" : "Enable"}</button>
+                    <button onClick={() => del(p.id)} style={{ ...smBtnStyle, color: "red" }}>Delete</button>
+                    <KeysButton providerId={p.id} />
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
-        ))}
-      </div>
+        );
+      })}
     </div>
   );
 }
@@ -160,9 +208,10 @@ function AddProvider({ onDone }: { onDone: () => void }) {
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [type, setType] = useState("free");
+  const [wireFormat, setWireFormat] = useState("openai");
 
   const submit = async () => {
-    await api("/admin/providers", { method: "POST", body: JSON.stringify({ name, baseUrl, type, enabled: true }) });
+    await api("/admin/providers", { method: "POST", body: JSON.stringify({ name, baseUrl, type, wireFormat, enabled: true }) });
     setName(""); setBaseUrl(""); onDone();
   };
 
@@ -170,10 +219,19 @@ function AddProvider({ onDone }: { onDone: () => void }) {
     <div style={{ ...cardStyle, marginTop: 16 }}>
       <input placeholder="name" value={name} onChange={e => setName(e.target.value)} style={inputStyle} />
       <input placeholder="base URL" value={baseUrl} onChange={e => setBaseUrl(e.target.value)} style={inputStyle} />
-      <select value={type} onChange={e => setType(e.target.value)} style={inputStyle}>
-        <option value="free">free</option>
-        <option value="paid">paid</option>
-      </select>
+      <div style={{ display: "flex", gap: 8 }}>
+        <select value={type} onChange={e => setType(e.target.value)} style={inputStyle}>
+          <option value="free">Free Tier</option>
+          <option value="paid">Paid</option>
+          <option value="local">Local</option>
+          <option value="subscription">Subscription</option>
+        </select>
+        <select value={wireFormat} onChange={e => setWireFormat(e.target.value)} style={inputStyle}>
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="google">Google</option>
+        </select>
+      </div>
       <button onClick={submit} style={btnStyle}>Create</button>
     </div>
   );
@@ -360,6 +418,11 @@ const cardStyle: React.CSSProperties = {
 const badgeStyle: React.CSSProperties = {
   display: "inline-block", padding: "2px 6px", margin: "0 4px 2px 0",
   background: "#f0f0f0", borderRadius: 4, fontSize: 12,
+};
+
+const filterBtn: React.CSSProperties = {
+  padding: "6px 12px", border: "none", borderRadius: 4,
+  cursor: "pointer", fontSize: 13, fontWeight: 600,
 };
 
 createRoot(document.getElementById("root")!).render(<App />);

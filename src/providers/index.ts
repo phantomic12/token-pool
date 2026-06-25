@@ -4,7 +4,7 @@ import type { DatabaseService } from "@/db";
 // ── Row mappers (snake_case DB → camelCase TS) ──
 
 interface ProviderRow {
-  id: number; name: string; base_url: string; type: "free" | "paid"; wire_format: string;
+  id: number; name: string; base_url: string; type: "free" | "paid" | "local" | "subscription"; wire_format: string;
   rpm_limit: number | null; rpd_limit: number | null; tpm_limit: number | null; tpd_limit: number | null;
   enabled: number; created_at: string;
 }

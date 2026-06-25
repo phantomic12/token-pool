@@ -341,9 +341,9 @@ export class OAuthService {
    * Used for providers that don't support device/web flow but accept pasted tokens.
    */
   storeRawToken(providerName: string, accessToken: string, scope?: string): void {
-    const provider = this.providers.getByName(providerName);
+    const provider = this.findProviderByName(providerName);
     if (!provider) {
-      throw new Error(`Provider '${providerName}' not found`);
+      throw new Error(`Provider '${providerName}' not found. Add it in the Providers page first.`);
     }
     this.storeToken({
       providerId: provider.id,
@@ -446,7 +446,7 @@ export class OAuthService {
   }
 
   disconnect(providerName: string): boolean {
-    const provider = this.providers.getByName(providerName);
+    const provider = this.findProviderByName(providerName);
     if (!provider) return false;
 
     const result = this.db.prepare(
@@ -460,6 +460,27 @@ export class OAuthService {
   getFlowType(providerName: string): FlowType {
     const config = this.getConfig(providerName);
     return config.flowType;
+  }
+
+  /** Find provider by name, trying exact match and common aliases */
+  private findProviderByName(name: string): { id: number } | undefined {
+    // Try exact match
+    let provider = this.providers.getByName(name);
+    if (provider) return provider;
+
+    // Try aliases
+    const aliases: Record<string, string[]> = {
+      "github-copilot": ["copilot", "github-models", "github"],
+      "google": ["gemini", "google-aistudio"],
+      "kiro": [],
+    };
+    const altNames = aliases[name] ?? [];
+    for (const alt of altNames) {
+      provider = this.providers.getByName(alt);
+      if (provider) return provider;
+    }
+
+    return undefined;
   }
 
   private getConfig(providerName: string): OAuthProviderConfig {

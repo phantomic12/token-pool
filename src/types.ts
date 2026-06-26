@@ -85,6 +85,7 @@ export interface Provider {
   rpdLimit: number | null;
   tpmLimit: number | null;
   tpdLimit: number | null;
+  maxConcurrentRequests: number | null;
   enabled: boolean;
   createdAt: string;
 }

@@ -107,6 +107,7 @@ export class ModelMetadataSync {
           type: "free",
           wireFormat: "openai",
           rpmLimit: null, rpdLimit: null, tpmLimit: null, tpdLimit: null,
+          maxConcurrentRequests: null,
           enabled: false, // disabled until user configures base URL + key
         });
         provider = this.providers.get(id);
@@ -160,6 +161,7 @@ export class ModelMetadataSync {
           type: "free",
           wireFormat: "openai",
           rpmLimit: null, rpdLimit: null, tpmLimit: null, tpdLimit: null,
+          maxConcurrentRequests: null,
           enabled: false,
         });
         provider = this.providers.get(id);

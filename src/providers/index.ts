@@ -6,6 +6,7 @@ import type { DatabaseService } from "@/db";
 interface ProviderRow {
   id: number; name: string; base_url: string; type: "free" | "paid" | "local" | "subscription"; wire_format: string;
   rpm_limit: number | null; rpd_limit: number | null; tpm_limit: number | null; tpd_limit: number | null;
+  max_concurrent_requests: number | null;
   enabled: number; created_at: string;
 }
 
@@ -27,6 +28,7 @@ function mapProvider(r: ProviderRow): Provider {
     id: r.id, name: r.name, baseUrl: r.base_url, type: r.type,
     wireFormat: r.wire_format as WireFormat,
     rpmLimit: r.rpm_limit, rpdLimit: r.rpd_limit, tpmLimit: r.tpm_limit, tpdLimit: r.tpd_limit,
+    maxConcurrentRequests: r.max_concurrent_requests,
     enabled: r.enabled === 1, createdAt: r.created_at,
   };
 }
@@ -71,8 +73,8 @@ export class ProviderService {
 
   create(p: Omit<Provider, "id" | "createdAt">): number {
     const stmt = this.db.prepare(
-      `INSERT INTO providers (name, base_url, type, wire_format, rpm_limit, rpd_limit, tpm_limit, tpd_limit, enabled)
-       VALUES (@name, @base_url, @type, @wire_format, @rpm_limit, @rpd_limit, @tpm_limit, @tpd_limit, @enabled)`
+      `INSERT INTO providers (name, base_url, type, wire_format, rpm_limit, rpd_limit, tpm_limit, tpd_limit, max_concurrent_requests, enabled)
+       VALUES (@name, @base_url, @type, @wire_format, @rpm_limit, @rpd_limit, @tpm_limit, @tpd_limit, @max_concurrent_requests, @enabled)`
     );
     const result = stmt.run({
       name: p.name,
@@ -83,6 +85,7 @@ export class ProviderService {
       rpd_limit: p.rpdLimit,
       tpm_limit: p.tpmLimit,
       tpd_limit: p.tpdLimit,
+      max_concurrent_requests: p.maxConcurrentRequests ?? null,
       enabled: p.enabled ? 1 : 0,
     });
     return Number(result.lastInsertRowid);
@@ -93,11 +96,11 @@ export class ProviderService {
     if (!existing) return false;
     const merged = { ...existing, ...p };
     this.db.prepare(
-      `UPDATE providers SET name=?, base_url=?, type=?, wire_format=?, rpm_limit=?, rpd_limit=?, tpm_limit=?, tpd_limit=?, enabled=? WHERE id=?`
+      `UPDATE providers SET name=?, base_url=?, type=?, wire_format=?, rpm_limit=?, rpd_limit=?, tpm_limit=?, tpd_limit=?, max_concurrent_requests=?, enabled=? WHERE id=?`
     ).run(
       merged.name, merged.baseUrl, merged.type, merged.wireFormat,
       merged.rpmLimit, merged.rpdLimit, merged.tpmLimit, merged.tpdLimit,
-      merged.enabled ? 1 : 0, id
+      merged.maxConcurrentRequests, merged.enabled ? 1 : 0, id
     );
     return true;
   }

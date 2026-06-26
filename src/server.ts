@@ -14,6 +14,7 @@ import { CryptoService } from "@/auth/crypto";
 import { ProviderService } from "@/providers";
 import { ProviderProxy, ProxyError } from "@/providers/proxy";
 import { RateLimitGuard } from "@/providers/rate-limiter";
+import { ConcurrencyGuard } from "@/providers/concurrency-guard";
 import { ModelMetadataSync } from "@/providers/model-sync";
 import { FusionService } from "@/fusion";
 import { FusionEngine, FusionError } from "@/fusion/engine";
@@ -32,6 +33,7 @@ export class TokenPoolServer {
   private providers: ProviderService;
   private proxy: ProviderProxy;
   private guard: RateLimitGuard;
+  private concurrencyGuard: ConcurrencyGuard;
   private fusion: FusionService;
   private fusionEngine: FusionEngine;
   private modelSync: ModelMetadataSync;
@@ -49,6 +51,7 @@ export class TokenPoolServer {
     this.providers = new ProviderService(this.db);
     this.proxy = new ProviderProxy(this.providers, this.crypto);
     this.guard = new RateLimitGuard(this.db, this.providers);
+    this.concurrencyGuard = new ConcurrencyGuard();
     this.fusion = new FusionService(this.db);
     this.fusionEngine = new FusionEngine(this.providers, this.proxy, this.crypto, this.guard, this.fusion);
     this.modelSync = new ModelMetadataSync(this.providers, this.config.modelsRefreshIntervalSec);
@@ -289,85 +292,107 @@ export class TokenPoolServer {
     userId: number = 1, // default user until auth on /v1/chat/completions
   ) {
     const startTime = Date.now();
-    const result = await this.proxy.forward(resolved.provider, resolved.modelId, body, resolved.key);
 
-    if (result.status === 429) {
-      this.guard.markBackoff(resolved.key.id);
-      throw new ProxyError(`Upstream 429 from ${resolved.provider.name}`, 429);
+    // ── Concurrency guard: acquire slot before forwarding ──
+    const provider = resolved.provider;
+    const concurrencyDecision = this.concurrencyGuard.tryAcquire(provider.id, provider.maxConcurrentRequests);
+    if (!concurrencyDecision.allowed) {
+      if (concurrencyDecision.retryAfterSec) {
+        reply.header("Retry-After", String(concurrencyDecision.retryAfterSec));
+      }
+      return reply.code(429).send({
+        error: {
+          message: `Concurrency limit exceeded for ${provider.name}: ${concurrencyDecision.reason}`,
+          type: "concurrency_limit_exceeded",
+          code: null,
+        },
+      });
     }
 
-    if (result.status !== 200) {
+    try {
+      const result = await this.proxy.forward(provider, resolved.modelId, body, resolved.key);
+
+      if (result.status === 429) {
+        this.guard.markBackoff(resolved.key.id);
+        throw new ProxyError(`Upstream 429 from ${provider.name}`, 429);
+      }
+
+      if (result.status !== 200) {
+        const text = typeof result.body === "string"
+          ? result.body
+          : await new Response(result.body as any).text();
+        throw new ProxyError(`Upstream ${result.status}: ${text}`, result.status);
+      }
+
+      // Clear backoff on success
+      this.guard.clearBackoff(resolved.key.id);
+
+      // Stream passthrough
+      if (body.stream) {
+        reply.raw.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+          "x-resolved-model": resolved.modelId,
+        });
+
+        const reader = (result.body as ReadableStream<Uint8Array>).getReader();
+        const writer = reply.raw;
+        let outputTokens = 0;
+
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            writer.write(Buffer.from(value));
+            // Try to count tokens from SSE chunks
+            outputTokens += countStreamTokens(value);
+          }
+        } catch (err) {
+          this.fastify.log.error({ err }, "Stream error");
+        } finally {
+          writer.end();
+        }
+
+        // Record usage (input estimate, output from stream count)
+        this.usage.record({
+          userId,
+          providerId: provider.id,
+          modelId: resolved.modelId,
+          tier: tierLabel as any,
+          inputTokens: estimateTokens(body),
+          outputTokens,
+          latencyMs: Date.now() - startTime,
+        });
+
+        return reply;
+      }
+
+      // Buffered response
       const text = typeof result.body === "string"
         ? result.body
         : await new Response(result.body as any).text();
-      throw new ProxyError(`Upstream ${result.status}: ${text}`, result.status);
-    }
 
-    // Clear backoff on success
-    this.guard.clearBackoff(resolved.key.id);
+      const data = JSON.parse(text);
+      reply.header("x-resolved-model", resolved.modelId);
 
-    // Stream passthrough
-    if (body.stream) {
-      reply.raw.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "x-resolved-model": resolved.modelId,
-      });
-
-      const reader = (result.body as ReadableStream<Uint8Array>).getReader();
-      const writer = reply.raw;
-      let outputTokens = 0;
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          writer.write(Buffer.from(value));
-          // Try to count tokens from SSE chunks
-          outputTokens += countStreamTokens(value);
-        }
-      } catch (err) {
-        this.fastify.log.error({ err }, "Stream error");
-      } finally {
-        writer.end();
-      }
-
-      // Record usage (input estimate, output from stream count)
+      // Record usage from response
+      const usage = (data as any)?.usage;
       this.usage.record({
         userId,
-        providerId: resolved.provider.id,
+        providerId: provider.id,
         modelId: resolved.modelId,
         tier: tierLabel as any,
-        inputTokens: estimateTokens(body),
-        outputTokens,
+        inputTokens: usage?.prompt_tokens ?? estimateTokens(body),
+        outputTokens: usage?.completion_tokens ?? 0,
         latencyMs: Date.now() - startTime,
       });
 
-      return reply;
+      return reply.send(data);
+    } finally {
+      // ── Always release the concurrency slot ──
+      this.concurrencyGuard.release(provider.id);
     }
-
-    // Buffered response
-    const text = typeof result.body === "string"
-      ? result.body
-      : await new Response(result.body as any).text();
-
-    const data = JSON.parse(text);
-    reply.header("x-resolved-model", resolved.modelId);
-
-    // Record usage from response
-    const usage = (data as any)?.usage;
-    this.usage.record({
-      userId,
-      providerId: resolved.provider.id,
-      modelId: resolved.modelId,
-      tier: tierLabel as any,
-      inputTokens: usage?.prompt_tokens ?? estimateTokens(body),
-      outputTokens: usage?.completion_tokens ?? 0,
-      latencyMs: Date.now() - startTime,
-    });
-
-    return reply.send(data);
   }
 
   // ── Admin routes (auth required) ──
@@ -391,6 +416,7 @@ export class TokenPoolServer {
           rpdLimit: body.rpdLimit ?? null,
           tpmLimit: body.tpmLimit ?? null,
           tpdLimit: body.tpdLimit ?? null,
+          maxConcurrentRequests: body.maxConcurrentRequests ?? null,
           enabled: body.enabled ?? true,
         });
         return reply.code(201).send({ id });

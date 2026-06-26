@@ -10,7 +10,7 @@ describe("DatabaseService", () => {
     expect(tiers[0].name).toBe("simple");
 
     const providers = db.prepare("SELECT * FROM providers ORDER BY id").all() as any[];
-    expect(providers.length).toBe(27);
+    expect(providers.length).toBe(28);
     expect(providers.some(p => p.name === "groq")).toBe(true);
 
     db.close();

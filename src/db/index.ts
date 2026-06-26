@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS providers (
   rpd_limit INTEGER,
   tpm_limit INTEGER,
   tpd_limit INTEGER,
+  max_concurrent_requests INTEGER,
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -161,6 +162,9 @@ const SEED_PROVIDERS: [string, string, string, string, number | null, number | n
   ["ollama", "http://localhost:11434/v1", "local", "openai", null, null, null, null],
   ["llamacpp", "http://localhost:8080/v1", "local", "openai", null, null, null, null],
   ["lmstudio", "http://localhost:1234/v1", "local", "openai", null, null, null, null],
+
+  // ── Subscription (OAuth/subscription-based) ──
+  ["umans", "https://api.umans.ai/v1", "subscription", "openai", null, null, null, null],
 ];
 
 // Migration: add wire_format column to existing providers table if missing
@@ -193,6 +197,11 @@ export class DatabaseService {
     const cols = this.db.prepare("PRAGMA table_info(providers)").all() as { name: string }[];
     if (!cols.some(c => c.name === "wire_format")) {
       this.db.exec(MIGRATION_ADD_WIRE_FORMAT);
+    }
+
+    // Check if max_concurrent_requests column exists
+    if (!cols.some(c => c.name === "max_concurrent_requests")) {
+      this.db.exec("ALTER TABLE providers ADD COLUMN max_concurrent_requests INTEGER");
     }
 
     // Migrate local providers from "free" to "local" category
@@ -229,6 +238,9 @@ export class DatabaseService {
   private postSeedMigrate() {
     // Ensure local providers have correct category even if they existed before
     this.db.exec("UPDATE providers SET type = 'local' WHERE name IN ('ollama', 'llamacpp', 'lmstudio') AND type = 'free'");
+
+    // Set concurrency limit for umans (default 4, expandable by buying more capacity)
+    this.db.exec("UPDATE providers SET max_concurrent_requests = 4 WHERE name = 'umans' AND max_concurrent_requests IS NULL");
   }
 
   private seedDefaults() {

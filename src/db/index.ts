@@ -174,8 +174,8 @@ const SEED_PROVIDERS: [string, string, string, string, number | null, number | n
   ["llamacpp", "http://localhost:8080/v1", "local", "openai", null, null, null, null],
   ["lmstudio", "http://localhost:1234/v1", "local", "openai", null, null, null, null],
 
-  // ── Subscription (OAuth/subscription-based) ──
-  ["umans", "https://api.umans.ai/v1", "subscription", "openai", null, null, null, null],
+  // ── Paid (coding-focused inference providers) ──
+  ["umans", "https://api.code.umans.ai/v1", "paid", "openai", null, null, null, null],
 ];
 
 // Migration: add wire_format column to existing providers table if missing
@@ -252,6 +252,9 @@ export class DatabaseService {
 
     // Set concurrency limit for umans (default 4, expandable by buying more capacity)
     this.db.exec("UPDATE providers SET max_concurrent_requests = 4 WHERE name = 'umans' AND max_concurrent_requests IS NULL");
+
+    // Fix umans base URL + category (was incorrectly seeded as subscription)
+    this.db.exec("UPDATE providers SET base_url = 'https://api.code.umans.ai/v1', type = 'paid' WHERE name = 'umans'");
   }
 
   private seedDefaults() {

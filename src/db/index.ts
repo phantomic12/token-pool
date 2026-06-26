@@ -116,6 +116,17 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
   scope TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS routing_profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  mode TEXT NOT NULL DEFAULT 'auto',           -- auto | tier | direct | fusion
+  target TEXT,                                   -- modelId for direct, tier name for tier, pool name for fusion
+  fallback_enabled INTEGER NOT NULL DEFAULT 1,  -- on failure, try fallback chain
+  is_default INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `;
 
 const SEED_TIERS = [

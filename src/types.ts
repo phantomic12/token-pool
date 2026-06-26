@@ -119,6 +119,21 @@ export interface ModelMetadata {
   fetchedAt: string;
 }
 
+// ── Routing profile types ──
+
+export type RoutingMode = "auto" | "tier" | "direct" | "fusion";
+
+export interface RoutingProfile {
+  id: number;
+  name: string;
+  description: string;
+  mode: RoutingMode;
+  target: string | null;
+  fallbackEnabled: boolean;
+  isDefault: boolean;
+  createdAt: string;
+}
+
 // ── Tier types ──
 
 export type TierName = "simple" | "standard" | "reasoning" | "complex" | "multimodal";

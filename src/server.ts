@@ -145,7 +145,7 @@ export class TokenPoolServer {
       return { id: user.id, username: user.username, role: user.role };
     });
 
-    // ── List models ──
+    // ── List models (+ routing profiles as virtual models) ──
     this.fastify.get("/v1/models", async () => {
       const dbModels = this.providers.listModels();
       const data = dbModels.map(m => ({
@@ -154,6 +154,32 @@ export class TokenPoolServer {
         created: 0,
         owned_by: m.providerId.toString(),
       }));
+
+      // Also list routing profiles as selectable models
+      const profiles = this.db.prepare("SELECT * FROM routing_profiles ORDER BY name").all() as any[];
+      for (const p of profiles) {
+        data.push({
+          id: `profile:${p.name}`,
+          object: "model" as const,
+          created: 0,
+          owned_by: "router",
+        });
+      }
+
+      // Also list tier names as selectable models
+      const tiers = this.db.prepare("SELECT name FROM tiers ORDER BY id").all() as { name: string }[];
+      for (const t of tiers) {
+        // Only add if not already a model ID
+        if (!data.some(d => d.id === t.name)) {
+          data.push({
+            id: t.name,
+            object: "model" as const,
+            created: 0,
+            owned_by: "tier",
+          });
+        }
+      }
+
       return { object: "list", data };
     });
 
@@ -167,13 +193,12 @@ export class TokenPoolServer {
         });
       }
 
-      // Check for fusion trigger
+      // Fusion is always available via model="fusion:poolname"
       if (body.model.startsWith("fusion:")) {
         try {
           const result = await this.fusionEngine.execute(body, body.model);
           reply.header("x-resolved-model", `fusion:${result.poolName}`);
 
-          // Record fusion usage
           this.usage.record({
             userId: 1,
             providerId: null,
@@ -196,12 +221,91 @@ export class TokenPoolServer {
         }
       }
 
-      // Check for explicit model (direct passthrough)
-      if (body.model.includes("/")) {
-        return await this.handleDirectRoute(body, reply);
+      // ── Resolve what to route to ──
+      // Resolution order:
+      // 1. X-Router-Profile header → use named profile
+      // 2. model="profile:name" → use named profile
+      // 3. model contains "/" → direct provider/model passthrough
+      // 4. model matches a known modelId → direct to that model (any provider)
+      // 5. model is a tier name → tier routing
+      // 6. Default → auto-classify + tier routing
+
+      const profileHeader = request.headers["x-router-profile"] as string | undefined;
+      const profileName = body.model.startsWith("profile:")
+        ? body.model.slice("profile:".length)
+        : profileHeader;
+
+      let mode: "auto" | "tier" | "direct" | "fusion" = "auto";
+      let target: string | null = null;
+      let fallbackEnabled = true;
+
+      if (profileName) {
+        // Look up routing profile by name
+        const profile = this.db.prepare(
+          "SELECT * FROM routing_profiles WHERE name = ?"
+        ).get(profileName) as
+          | { mode: string; target: string | null; fallback_enabled: number }
+          | undefined;
+
+        if (!profile) {
+          return reply.code(404).send({
+            error: { message: `Routing profile '${profileName}' not found`, type: "not_found", code: null },
+          });
+        }
+
+        mode = profile.mode as "auto" | "tier" | "direct" | "fusion";
+        target = profile.target;
+        fallbackEnabled = profile.fallback_enabled === 1;
+
+        // If profile mode is direct, override the model with target
+        if (mode === "direct" && target) {
+          body.model = target;
+        }
+      } else if (body.model.includes("/")) {
+        // Direct provider/model passthrough (existing behavior)
+        mode = "direct";
+      } else {
+        // Check if model matches a known modelId
+        const allModels = this.providers.listModels();
+        const knownModel = allModels.find(m => m.modelId === body.model);
+        if (knownModel) {
+          mode = "direct";
+          // Keep body.model as-is — handleDirectRoute will resolve it
+        } else {
+          // Check if it's a tier name
+          const tierRow = this.db.prepare("SELECT name FROM tiers WHERE name = ?").get(body.model) as { name: string } | undefined;
+          if (tierRow) {
+            mode = "tier";
+            target = body.model;
+          }
+          // else: auto-classify (default)
+        }
       }
 
-      // Tier-based routing
+      // ── Execute based on mode ──
+
+      if (mode === "direct") {
+        const result = await this.handleDirectRoute(body, reply, fallbackEnabled);
+        return result;
+      }
+
+      if (mode === "tier") {
+        const tier = target as string;
+        const estTokens = estimateTokens(body) + (body.max_tokens ?? 1000);
+        const chain = getFallbackChain(this.db, this.providers, this.guard, tier as any, estTokens);
+        if (chain.length === 0) {
+          return reply.code(503).send({
+            error: {
+              message: `No models configured or available for tier '${tier}'.`,
+              type: "no_provider",
+              code: null,
+            },
+          });
+        }
+        return await this.tryFallbackChain(body, chain, reply, tier);
+      }
+
+      // mode === "auto" — classify and route
       const explicitTier = request.headers["x-router-tier"] as string | undefined;
       const classification = classifyRequest(body, explicitTier);
       const estTokens = estimateTokens(body) + (body.max_tokens ?? 1000);
@@ -217,71 +321,117 @@ export class TokenPoolServer {
         });
       }
 
-      // Try each model in the fallback chain
-      for (const resolved of chain) {
-        try {
-          return await this.handleProxy(body, resolved, reply, classification.tier);
-        } catch (err: any) {
-          // On 429, mark the key as backed off and try next
-          if (err instanceof ProxyError && err.statusCode === 429) {
-            this.guard.markBackoff(resolved.key.id);
-            this.fastify.log.warn(
-              { model: resolved.modelId, provider: resolved.provider.name },
-              "Provider 429 — key backed off, trying next in chain"
-            );
-          } else {
-            this.fastify.log.warn(
-              { err, model: resolved.modelId, provider: resolved.provider.name },
-              "Provider failed, trying next in chain"
-            );
-          }
-          continue;
-        }
-      }
-
-      return reply.code(502).send({
-        error: { message: "All providers in fallback chain failed", type: "upstream_error", code: null },
-      });
+      return await this.tryFallbackChain(body, chain, reply, classification.tier);
     });
 
     this.registerAdminRoutes();
   }
 
-  private async handleDirectRoute(body: ChatCompletionRequest, reply: any) {
+  /**
+   * Try each model in the fallback chain. If fallback is disabled, only try the first.
+   */
+  private async tryFallbackChain(
+    body: ChatCompletionRequest,
+    chain: ResolvedModel[],
+    reply: any,
+    tierLabel: string,
+  ) {
+    const models = chain; // use all if fallback enabled, else just first
+    for (const resolved of models) {
+      try {
+        return await this.handleProxy(body, resolved, reply, tierLabel);
+      } catch (err: any) {
+        if (err instanceof ProxyError && err.statusCode === 429) {
+          this.guard.markBackoff(resolved.key.id);
+          this.fastify.log.warn(
+            { model: resolved.modelId, provider: resolved.provider.name },
+            "Provider 429 — key backed off, trying next in chain"
+          );
+        } else {
+          this.fastify.log.warn(
+            { err, model: resolved.modelId, provider: resolved.provider.name },
+            "Provider failed, trying next in chain"
+          );
+        }
+        continue;
+      }
+    }
+
+    return reply.code(502).send({
+      error: { message: "All providers in fallback chain failed", type: "upstream_error", code: null },
+    });
+  }
+
+  /**
+   * Resolve a model name to provider+key and proxy the request.
+   * Supports both "provider/model" format and bare model names.
+   * If fallbackEnabled, tries other providers for same model on failure.
+   */
+  private async handleDirectRoute(
+    body: ChatCompletionRequest,
+    reply: any,
+    fallbackEnabled: boolean = true,
+  ) {
     const allModels = this.providers.listModels();
-    const model = allModels.find(m => m.modelId === body.model);
-    if (!model) {
+
+    // Find all providers that have this model
+    // If model contains "/", it's "provider/modelId" — find exact match
+    // Otherwise, find all providers that have this modelId
+    let candidates: typeof allModels;
+    if (body.model.includes("/")) {
+      const exact = allModels.find(m => m.modelId === body.model);
+      candidates = exact ? [exact] : [];
+    } else {
+      candidates = allModels.filter(m => m.modelId === body.model);
+    }
+
+    if (candidates.length === 0) {
       return reply.code(404).send({
         error: { message: `Model '${body.model}' not found`, type: "not_found", code: null },
       });
     }
 
-    const provider = this.providers.get(model.providerId);
-    if (!provider || !provider.enabled) {
-      return reply.code(503).send({
-        error: { message: "Provider not available", type: "no_provider", code: null },
-      });
+    // Try each provider that has this model
+    for (const model of candidates) {
+      const provider = this.providers.get(model.providerId);
+      if (!provider || !provider.enabled) continue;
+
+      const estTokens = estimateTokens(body) + (body.max_tokens ?? 1000);
+      const decision = this.guard.tryAcquire(provider, estTokens);
+      if (!decision.allowed || !decision.key) {
+        if (!fallbackEnabled) {
+          return reply.code(429).send({
+            error: {
+              message: `Rate limit exceeded for ${provider.name}: ${decision.reason}`,
+              type: "rate_limit_exceeded",
+              code: null,
+            },
+          });
+        }
+        continue; // try next provider
+      }
+
+      const resolved: ResolvedModel = {
+        modelId: body.model,
+        provider,
+        key: decision.key,
+      };
+
+      try {
+        return await this.handleProxy(body, resolved, reply, "direct");
+      } catch (err: any) {
+        if (!fallbackEnabled) throw err;
+        this.fastify.log.warn(
+          { err, model: body.model, provider: provider.name },
+          "Direct route failed, trying next provider"
+        );
+        continue;
+      }
     }
 
-    const estTokens = estimateTokens(body) + (body.max_tokens ?? 1000);
-    const decision = this.guard.tryAcquire(provider, estTokens);
-    if (!decision.allowed || !decision.key) {
-      return reply.code(429).send({
-        error: {
-          message: `Rate limit exceeded for ${provider.name}: ${decision.reason}`,
-          type: "rate_limit_exceeded",
-          code: null,
-        },
-      });
-    }
-
-    const resolved: ResolvedModel = {
-      modelId: body.model,
-      provider,
-      key: decision.key,
-    };
-
-    return await this.handleProxy(body, resolved, reply, "direct");
+    return reply.code(503).send({
+      error: { message: `No available provider for model '${body.model}'`, type: "no_provider", code: null },
+    });
   }
 
   private async handleProxy(
@@ -493,6 +643,68 @@ export class TokenPoolServer {
       for (const m of models) {
         stmt.run(tierRow.id, m.modelId, m.providerId, m.priority);
       }
+      return { ok: true };
+    });
+
+    // ── Routing profiles ──
+
+    this.fastify.get("/v1/admin/routing-profiles", adminGuard, async () => {
+      return this.db.prepare("SELECT * FROM routing_profiles ORDER BY is_default DESC, name").all();
+    });
+
+    this.fastify.post("/v1/admin/routing-profiles", adminGuard, async (request, reply) => {
+      const body = request.body as any;
+      if (!body?.name) {
+        return reply.code(400).send({ error: { message: "name is required", type: "invalid_request", code: null } });
+      }
+      const mode = body.mode ?? "auto";
+      if (!["auto", "tier", "direct", "fusion"].includes(mode)) {
+        return reply.code(400).send({ error: { message: "mode must be auto, tier, direct, or fusion", type: "invalid_request", code: null } });
+      }
+      // If setting as default, unset all others
+      if (body.isDefault) {
+        this.db.prepare("UPDATE routing_profiles SET is_default = 0").run();
+      }
+      const result = this.db.prepare(
+        "INSERT INTO routing_profiles (name, description, mode, target, fallback_enabled, is_default) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run(
+        body.name,
+        body.description ?? "",
+        mode,
+        body.target ?? null,
+        body.fallbackEnabled === false ? 0 : 1,
+        body.isDefault ? 1 : 0,
+      );
+      return reply.code(201).send({ id: Number(result.lastInsertRowid) });
+    });
+
+    this.fastify.put("/v1/admin/routing-profiles/:id", adminGuard, async (request, reply) => {
+      const id = parseInt((request.params as any).id, 10);
+      const body = request.body as any;
+      const existing = this.db.prepare("SELECT * FROM routing_profiles WHERE id = ?").get(id);
+      if (!existing) {
+        return reply.code(404).send({ error: { message: "profile not found", type: "not_found", code: null } });
+      }
+      if (body.isDefault) {
+        this.db.prepare("UPDATE routing_profiles SET is_default = 0").run();
+      }
+      this.db.prepare(
+        "UPDATE routing_profiles SET name=?, description=?, mode=?, target=?, fallback_enabled=?, is_default=? WHERE id=?"
+      ).run(
+        body.name ?? (existing as any).name,
+        body.description ?? (existing as any).description,
+        body.mode ?? (existing as any).mode,
+        body.target !== undefined ? body.target : (existing as any).target,
+        body.fallbackEnabled === false ? 0 : 1,
+        body.isDefault ? 1 : 0,
+        id,
+      );
+      return { ok: true };
+    });
+
+    this.fastify.delete("/v1/admin/routing-profiles/:id", adminGuard, async (request, reply) => {
+      const id = parseInt((request.params as any).id, 10);
+      this.db.prepare("DELETE FROM routing_profiles WHERE id = ?").run(id);
       return { ok: true };
     });
 

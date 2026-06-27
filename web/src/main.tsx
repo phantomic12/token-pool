@@ -11,6 +11,7 @@ const themeStyle = `
 :root {
   --bg: #f5f5f5;
   --surface: #fff;
+  --surface-2: #f9f9f9;
   --text: #1a1a1a;
   --text-secondary: #666;
   --border: #e0e0e0;
@@ -18,10 +19,12 @@ const themeStyle = `
   --success: #2d5;
   --danger: #d33;
   --badge-bg: #f0f0f0;
+  --shadow: 0 2px 8px rgba(0,0,0,0.08);
 }
 :root.dark {
   --bg: #1a1a2e;
   --surface: #16213e;
+  --surface-2: #1e2a4a;
   --text: #eee;
   --text-secondary: #999;
   --border: #333;
@@ -29,9 +32,18 @@ const themeStyle = `
   --success: #2d5;
   --danger: #e55;
   --badge-bg: #2a2a4a;
+  --shadow: 0 2px 8px rgba(0,0,0,0.4);
 }
 body { background: var(--bg); color: var(--text); margin: 0; }
 * { box-sizing: border-box; }
+@media (max-width: 768px) {
+  .tp-sidebar { width: 100% !important; height: auto !important; position: relative !important; flex-direction: row !important; overflow-x: auto; }
+  .tp-nav-items { flex-direction: row !important; }
+  .tp-main { padding: 12px !important; }
+  .tp-stats-grid { grid-template-columns: repeat(2, 1fr) !important; }
+  .tp-params-grid { grid-template-columns: 1fr !important; }
+  .tp-tier-grid { grid-template-columns: 1fr !important; }
+}
 @keyframes slideIn {
   from { opacity: 0; transform: translateX(20px); }
   to { opacity: 1; transform: translateX(0); }
@@ -257,6 +269,9 @@ function Providers() {
   const [createMode, setCreateMode] = useState(false);
   const [keyCounts, setKeyCounts] = useState<Record<number, number>>({});
   const [oauthConnected, setOauthConnected] = useState<Set<string>>(new Set());
+  const [healthResults, setHealthResults] = useState<Record<number, { healthy: boolean; latencyMs?: number; error?: string }>>({});
+  const [testingAll, setTestingAll] = useState(false);
+  const [usageData, setUsageData] = useState<Record<number, any>>({});
 
   const load = useCallback(async () => {
     const list = await api("/admin/providers");
@@ -279,9 +294,34 @@ function Providers() {
       }
       setOauthConnected(connected);
     } catch { /* ignore */ }
+    // Fetch usage for each provider
+    const usage: Record<number, any> = {};
+    await Promise.all(list.map(async (p: any) => {
+      try {
+        usage[p.id] = await api(`/admin/providers/${p.id}/usage`);
+      } catch { usage[p.id] = null; }
+    }));
+    setUsageData(usage);
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  const testAll = async () => {
+    setTestingAll(true);
+    setHealthResults({});
+    try {
+      const results = await api("/admin/providers/test-all", { method: "POST" });
+      const map: Record<number, { healthy: boolean; latencyMs?: number; error?: string }> = {};
+      for (const r of results) {
+        map[r.providerId] = { healthy: r.healthy, latencyMs: r.latencyMs, error: r.error };
+      }
+      setHealthResults(map);
+    } catch (e: any) {
+      console.error("Test all failed:", e);
+    } finally {
+      setTestingAll(false);
+    }
+  };
 
   const filtered = filter === "all" ? providers : providers.filter(p => p.type === filter);
   const byCategory: Record<string, any[]> = {};
@@ -319,6 +359,9 @@ function Providers() {
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
         <h2 style={{ margin: 0, color: "var(--text)" }}>Providers ({providers.length})</h2>
         <button onClick={() => setCreateMode(true)} style={btnStyle}>+ Add Provider</button>
+        <button onClick={testAll} disabled={testingAll} style={{ ...smBtnStyle, whiteSpace: "nowrap", opacity: testingAll ? 0.6 : 1 }}>
+          {testingAll ? "Testing..." : "⚡ Test All"}
+        </button>
       </div>
 
       {!hasConnected && (
@@ -381,8 +424,52 @@ function Providers() {
                       }}>
                         {status.label}
                       </span>
-                      {p.rpmLimit && <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>{p.rpmLimit} RPM</span>}
+                      {healthResults[p.id] && (
+                        <span style={{
+                          fontSize: 11, padding: "2px 8px", borderRadius: 4, fontWeight: 600,
+                          background: healthResults[p.id].healthy ? "rgba(34,221,85,0.15)" : "rgba(255,50,50,0.15)",
+                          color: healthResults[p.id].healthy ? "var(--success)" : "var(--danger)",
+                        }} title={healthResults[p.id].error || `Healthy — ${healthResults[p.id].latencyMs}ms`}>
+                          {healthResults[p.id].healthy ? `✓ ${healthResults[p.id].latencyMs}ms` : "✗ Failed"}
+                        </span>
+                      )}
+                      {!healthResults[p.id] && p.rpmLimit && <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>{p.rpmLimit} RPM</span>}
                     </div>
+                    {/* Rate limit usage bar */}
+                    {usageData[p.id] && usageData[p.id].length > 0 && (() => {
+                      const totalRpm = usageData[p.id].reduce((s: number, k: any) => s + (k.usage?.rpmUsed || 0), 0);
+                      const totalRpmLimit = usageData[p.id].reduce((s: number, k: any) => s + (k.usage?.rpmLimit || 0), 0);
+                      const totalRpd = usageData[p.id].reduce((s: number, k: any) => s + (k.usage?.rpdUsed || 0), 0);
+                      const totalRpdLimit = usageData[p.id].reduce((s: number, k: any) => s + (k.usage?.rpdLimit || 0), 0);
+                      const rpmPct = totalRpmLimit > 0 ? Math.min(100, (totalRpm / totalRpmLimit) * 100) : 0;
+                      const rpdPct = totalRpdLimit > 0 ? Math.min(100, (totalRpd / totalRpdLimit) * 100) : 0;
+                      if (totalRpmLimit === 0 && totalRpdLimit === 0) return null;
+                      const barColor = (pct: number) => pct > 90 ? "var(--danger)" : pct > 70 ? "#fa0" : "var(--success)";
+                      return (
+                        <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 3 }}>
+                          {totalRpmLimit > 0 && (
+                            <div>
+                              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--text-secondary)", marginBottom: 1 }}>
+                                <span>RPM</span><span>{totalRpm}/{totalRpmLimit}</span>
+                              </div>
+                              <div style={{ height: 3, borderRadius: 2, background: "var(--badge-bg)", overflow: "hidden" }}>
+                                <div style={{ height: "100%", width: `${rpmPct}%`, background: barColor(rpmPct), borderRadius: 2 }} />
+                              </div>
+                            </div>
+                          )}
+                          {totalRpdLimit > 0 && (
+                            <div>
+                              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--text-secondary)", marginBottom: 1 }}>
+                                <span>RPD</span><span>{totalRpd}/{totalRpdLimit}</span>
+                              </div>
+                              <div style={{ height: 3, borderRadius: 2, background: "var(--badge-bg)", overflow: "hidden" }}>
+                                <div style={{ height: "100%", width: `${rpdPct}%`, background: barColor(rpdPct), borderRadius: 2 }} />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 );
               })}
@@ -446,6 +533,9 @@ function ProviderDetail({ provider, onBack, onSaved, keyCounts, oauthConnected }
   const [newKeyValue, setNewKeyValue] = useState("");
   const [keyError, setKeyError] = useState("");
 
+  // Models list
+  const [providerModels, setProviderModels] = useState<any[]>([]);
+
   // OAuth state
   const [oauthState, setOauthState] = useState<OAuthState | null>(null);
   const [oauthStatus, setOauthStatus] = useState<string>("");
@@ -461,8 +551,18 @@ function ProviderDetail({ provider, onBack, onSaved, keyCounts, oauthConnected }
     } catch { setKeys([]); }
   }, [isCreate, provider]);
 
+  // Load models for this provider
+  const loadModels = useCallback(async () => {
+    if (isCreate || !provider) return;
+    try {
+      const m = await api(`/admin/models?providerId=${provider.id}`);
+      setProviderModels(Array.isArray(m) ? m : []);
+    } catch { setProviderModels([]); }
+  }, [isCreate, provider]);
+
   useEffect(() => {
     loadKeys();
+    loadModels();
     return () => { if (pollRef.current) clearTimeout(pollRef.current); };
   }, [loadKeys]);
 
@@ -663,18 +763,34 @@ function ProviderDetail({ provider, onBack, onSaved, keyCounts, oauthConnected }
           </div>
         </div>
         {!isCreate && (
-          <button
-            onClick={toggleEnabled}
-            style={{
-              ...smBtnStyle,
-              background: enabled ? "var(--success)" : "var(--badge-bg)",
-              color: enabled ? "#fff" : "var(--text-secondary)",
-              padding: "6px 14px",
-              fontWeight: 600,
-            }}
-          >
-            {enabled ? "● Enabled" : "○ Disabled"}
-          </button>
+          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <button
+              onClick={async () => {
+                try {
+                  const result = await api(`/admin/providers/${provider.id}/test`, { method: "POST" });
+                  alert(`✓ Healthy — ${result.latencyMs}ms (model: ${result.model})`);
+                } catch (e: any) {
+                  alert(`✗ Failed: ${e.message}`);
+                }
+              }}
+              style={{ ...smBtnStyle, whiteSpace: "nowrap" }}
+              disabled={!enabled}
+            >
+              ⚡ Test
+            </button>
+            <button
+              onClick={toggleEnabled}
+              style={{
+                ...smBtnStyle,
+                background: enabled ? "var(--success)" : "var(--badge-bg)",
+                color: enabled ? "#fff" : "var(--text-secondary)",
+                padding: "6px 14px",
+                fontWeight: 600,
+              }}
+            >
+              {enabled ? "● Enabled" : "○ Disabled"}
+            </button>
+          </div>
         )}
       </div>
 
@@ -852,6 +968,45 @@ function ProviderDetail({ provider, onBack, onSaved, keyCounts, oauthConnected }
         </div>
       </div>
 
+      {/* Available models */}
+      {!isCreate && (
+        <div style={sectionCard}>
+          <h3 style={sectionTitle}>Available Models ({providerModels.length})</h3>
+          {providerModels.length === 0 ? (
+            <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+              No models synced. Click "Sync Models" to fetch from provider.
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 200, overflowY: "auto" }}>
+              {providerModels.map(m => (
+                <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", borderRadius: 4, background: "var(--badge-bg)" }}>
+                  <span style={{ fontFamily: "monospace", fontSize: 12, color: "var(--text)", flex: 1 }}>{m.modelId}</span>
+                  {m.contextWindow > 0 && <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>{(m.contextWindow / 1000).toFixed(0)}k ctx</span>}
+                  {m.supportsVision && <span style={{ ...badgeStyle, fontSize: 10 }}>vision</span>}
+                  {m.supportsTools && <span style={{ ...badgeStyle, fontSize: 10 }}>tools</span>}
+                  {m.inputCostPerMtok != null && <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>${m.inputCostPerMtok}/M</span>}
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ marginTop: 8 }}>
+            <button
+              onClick={async () => {
+                try {
+                  await api("/admin/models/sync", { method: "POST" });
+                  await loadModels();
+                } catch (e: any) {
+                  setError(e.message);
+                }
+              }}
+              style={smBtnStyle}
+            >
+              ↻ Sync Models
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Danger zone */}
       {!isCreate && (
         <div style={{ ...sectionCard, borderColor: "var(--danger)", borderWidth: 1 }}>
@@ -877,6 +1032,11 @@ function ProviderDetail({ provider, onBack, onSaved, keyCounts, oauthConnected }
 function Tiers() {
   const [tiers, setTiers] = useState<any[]>([]);
   const [models, setModels] = useState<Record<string, any[]>>({});
+  const [allModels, setAllModels] = useState<any[]>([]);
+  const [allProviders, setAllProviders] = useState<any[]>([]);
+  const [addingToTier, setAddingToTier] = useState<string | null>(null);
+  const [newModelId, setNewModelId] = useState("");
+  const [newProviderId, setNewProviderId] = useState("");
 
   const load = useCallback(async () => {
     const t = await api("/admin/tiers");
@@ -886,33 +1046,125 @@ function Tiers() {
       m[tier.name] = await api(`/admin/tiers/${tier.name}/models`);
     }
     setModels(m);
+    setAllModels(await api("/admin/models"));
+    setAllProviders(await api("/admin/providers"));
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
+  const saveTierModels = async (tierName: string, updatedModels: any[]) => {
+    try {
+      await api(`/admin/tiers/${tierName}/models`, {
+        method: "PUT",
+        body: JSON.stringify(updatedModels.map((m, i) => ({
+          modelId: m.model_id || m.modelId,
+          providerId: m.provider_id || m.providerId,
+          priority: i + 1,
+        }))),
+      });
+      await load();
+    } catch (e: any) {
+      alert(`Failed to save: ${e.message}`);
+    }
+  };
+
+  const removeModel = async (tierName: string, idx: number) => {
+    const updated = models[tierName].filter((_: any, i: number) => i !== idx);
+    await saveTierModels(tierName, updated);
+  };
+
+  const moveModel = async (tierName: string, idx: number, dir: "up" | "down") => {
+    const arr = [...models[tierName]];
+    const newIdx = dir === "up" ? idx - 1 : idx + 1;
+    if (newIdx < 0 || newIdx >= arr.length) return;
+    [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]];
+    await saveTierModels(tierName, arr);
+  };
+
+  const addModel = async (tierName: string) => {
+    if (!newModelId || !newProviderId) return;
+    const updated = [...(models[tierName] || []), { model_id: newModelId, provider_id: parseInt(newProviderId) }];
+    await saveTierModels(tierName, updated);
+    setNewModelId(""); setNewProviderId(""); setAddingToTier(null);
+  };
+
   return (
     <div>
       <h2 style={{ color: "var(--text)" }}>Routing Tiers</h2>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(350px, 1fr))", gap: 16 }}>
         {tiers.map(t => (
           <div key={t.id} style={cardStyle}>
-            <strong style={{ color: "var(--text)" }}>{t.name}</strong>
-            <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>{t.description}</div>
-            <div style={{ marginTop: 8, fontSize: 13, color: "var(--text)" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <strong style={{ color: "var(--text)" }}>{t.name}</strong>
+              <span style={{ ...badgeStyle, background: "var(--badge-bg)" }}>{models[t.name]?.length || 0} models</span>
+            </div>
+            <div style={{ fontSize: 13, color: "var(--text-secondary)", marginTop: 4 }}>{t.description}</div>
+            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
               {models[t.name]?.length > 0 ? (
                 models[t.name].map((m: any, i: number) => (
-                  <div key={i}>{m.priority}. {m.model_id} (provider {m.provider_id})</div>
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: 4, background: "var(--badge-bg)" }}>
+                    <span style={{ color: "var(--text-secondary)", fontSize: 12, minWidth: 20 }}>{i + 1}.</span>
+                    <span style={{ fontFamily: "monospace", fontSize: 12, color: "var(--text)", flex: 1 }}>{m.model_id || m.modelId}</span>
+                    <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                      {allProviders.find(p => p.id === (m.provider_id || m.providerId))?.name || `#${m.provider_id || m.providerId}`}
+                    </span>
+                    <button onClick={() => moveModel(t.name, i, "up")} disabled={i === 0} style={{ ...hoverBtn, opacity: i === 0 ? 0.3 : 1 }}>▲</button>
+                    <button onClick={() => moveModel(t.name, i, "down")} disabled={i === models[t.name].length - 1} style={{ ...hoverBtn, opacity: i === models[t.name].length - 1 ? 0.3 : 1 }}>▼</button>
+                    <button onClick={() => removeModel(t.name, i)} style={{ ...hoverBtn, color: "var(--danger)" }}>×</button>
+                  </div>
                 ))
               ) : (
-                <div style={{ color: "var(--text-secondary)" }}>No models configured</div>
+                <div style={{ color: "var(--text-secondary)", fontSize: 13 }}>No models configured</div>
               )}
             </div>
+            {/* Fallback chain flow visualization */}
+            {models[t.name]?.length > 1 && (
+              <div style={{ marginTop: 8, padding: "8px 4px", fontSize: 11, color: "var(--text-secondary)", overflowX: "auto" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 2, whiteSpace: "nowrap" }}>
+                  <span style={{ padding: "2px 6px", borderRadius: 3, background: "var(--accent)", color: "#fff", fontSize: 10, fontWeight: 600 }}>Request</span>
+                  {models[t.name].map((m: any, i: number) => (
+                    <span key={i} style={{ display: "flex", alignItems: "center", gap: 2 }}>
+                      <span style={{ color: "var(--text-secondary)" }}>→</span>
+                      <span style={{ padding: "2px 6px", borderRadius: 3, background: "var(--badge-bg)", color: "var(--text)", fontSize: 10 }}>
+                        {(m.model_id || m.modelId).slice(0, 20)}
+                      </span>
+                      {i < models[t.name].length - 1 && (
+                        <span style={{ fontSize: 9, color: "var(--text-secondary)" }}>fallback</span>
+                      )}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {addingToTier === t.name ? (
+              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+                <select value={newModelId} onChange={e => setNewModelId(e.target.value)} style={{ ...inputStyle, margin: 0, fontSize: 12, cursor: "pointer" }}>
+                  <option value="">Select model...</option>
+                  {allModels.map((m: any, i: number) => <option key={i} value={m.modelId}>{m.modelId}</option>)}
+                </select>
+                <select value={newProviderId} onChange={e => setNewProviderId(e.target.value)} style={{ ...inputStyle, margin: 0, fontSize: 12, cursor: "pointer" }}>
+                  <option value="">Select provider...</option>
+                  {allProviders.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+                <div style={{ display: "flex", gap: 4 }}>
+                  <button onClick={() => addModel(t.name)} disabled={!newModelId || !newProviderId} style={{ ...btnStyle, fontSize: 12, padding: "4px 12px" }}>Add</button>
+                  <button onClick={() => setAddingToTier(null)} style={smBtnStyle}>Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <button onClick={() => setAddingToTier(t.name)} style={{ ...smBtnStyle, marginTop: 8 }}>+ Add Model</button>
+            )}
           </div>
         ))}
       </div>
     </div>
   );
 }
+
+const hoverBtn: React.CSSProperties = {
+  border: "none", background: "transparent", cursor: "pointer", fontSize: 12,
+  padding: "2px 6px", borderRadius: 4, color: "var(--text-secondary)",
+};
 
 // ── Stats ──
 
@@ -928,6 +1180,53 @@ function StatCard({ title, value, sub, color }: { title: string; value: string; 
       <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: 1, color: "var(--text-secondary)", marginBottom: 4 }}>{title}</div>
       <div style={{ fontSize: 28, fontWeight: 700, color }}>{value}</div>
       {sub && <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 4 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function DimensionTable({ stats }: { stats: any }) {
+  const [dimension, setDimension] = useState<"model" | "provider" | "tier">("model");
+
+  let rows: { name: string; count: number; inputTokens: number; outputTokens: number; avgLatency?: number }[] = [];
+  if (dimension === "model") {
+    rows = (stats.byModel || []).map((r: any) => ({ name: r.modelId, count: r.count, inputTokens: r.inputTokens || 0, outputTokens: r.outputTokens || 0, avgLatency: r.avgLatencyMs }));
+  } else if (dimension === "provider") {
+    rows = (stats.byProvider || []).map((r: any) => ({ name: `Provider #${r.providerId}`, count: r.count, inputTokens: r.inputTokens || 0, outputTokens: r.outputTokens || 0 }));
+  } else {
+    rows = (stats.byTier || []).map((r: any) => ({ name: r.tier, count: r.count, inputTokens: r.inputTokens || 0, outputTokens: r.outputTokens || 0 }));
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        {(["model", "provider", "tier"] as const).map(d => (
+          <button key={d} onClick={() => setDimension(d)} style={{ ...filterBtn, background: dimension === d ? "var(--accent)" : "var(--badge-bg)", color: dimension === d ? "#fff" : "var(--text-secondary)" }}>
+            {d.charAt(0).toUpperCase() + d.slice(1)}
+          </button>
+        ))}
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead>
+            <tr style={{ borderBottom: "2px solid var(--border)", textAlign: "left" }}>
+              <th style={{ padding: "6px 12px", color: "var(--text-secondary)" }}>{dimension.charAt(0).toUpperCase() + dimension.slice(1)}</th>
+              <th style={{ padding: "6px 12px", color: "var(--text-secondary)", textAlign: "right" }}>Requests</th>
+              <th style={{ padding: "6px 12px", color: "var(--text-secondary)", textAlign: "right" }}>Tokens</th>
+              {dimension === "model" && <th style={{ padding: "6px 12px", color: "var(--text-secondary)", textAlign: "right" }}>Avg Latency</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i} style={{ borderBottom: "1px solid var(--border)" }}>
+                <td style={{ padding: "6px 12px", color: "var(--text)", fontFamily: "monospace", fontSize: 12 }}>{r.name}</td>
+                <td style={{ padding: "6px 12px", color: "var(--text)", textAlign: "right" }}>{r.count}</td>
+                <td style={{ padding: "6px 12px", color: "var(--text-secondary)", textAlign: "right" }}>{((r.inputTokens || 0) + (r.outputTokens || 0)).toLocaleString()}</td>
+                {dimension === "model" && <td style={{ padding: "6px 12px", color: "var(--text-secondary)", textAlign: "right" }}>{r.avgLatency ? `${Math.round(r.avgLatency)}ms` : "—"}</td>}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -985,11 +1284,18 @@ function Stats() {
       </div>
 
       {/* Summary cards */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 16 }}>
+      <div className="tp-stats-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12, marginBottom: 16 }}>
         <StatCard title="Total Requests" value={totalRequests.toLocaleString()} color="#4285f4" />
         <StatCard title="Total Tokens" value={totalTokens.toLocaleString()} sub={`${(total.inputTokens ?? 0).toLocaleString()} in / ${(total.outputTokens ?? 0).toLocaleString()} out`} color="#2d5" />
         <StatCard title="Avg Latency" value={avgLatency > 0 ? `${Math.round(avgLatency)}ms` : "—"} color="#fa0" />
         <StatCard title="Total Cost" value={`$${totalCost.toFixed(2)}`} color="#a8328a" />
+        <StatCard title="Success Rate" value={totalRequests > 0 ? `${(((totalRequests - (total.errorCount ?? 0)) / totalRequests) * 100).toFixed(1)}%` : "—"} sub={`${total.errorCount ?? 0} errors`} color={totalRequests > 0 && (total.errorCount ?? 0) / totalRequests > 0.1 ? "var(--danger)" : "#2d5"} />
+      </div>
+
+      {/* Group-by summary table */}
+      <div style={{ ...cardStyle, marginBottom: 16 }}>
+        <h3 style={{ margin: "0 0 12px", color: "var(--text)" }}>Summary by Dimension</h3>
+        <DimensionTable stats={stats} />
       </div>
 
       {/* Daily Requests — Area chart with gradient */}
@@ -1111,11 +1417,15 @@ interface PlaygroundMessage {
   tokensIn?: number;
   tokensOut?: number;
   error?: boolean;
+  // For compare mode: multiple model responses for a single user turn
+  responses?: { model: string; content: string; latencyMs?: number; error?: boolean }[];
 }
 
 function Playground() {
   const [models, setModels] = useState<any[]>([]);
   const [selectedModel, setSelectedModel] = useState("");
+  const [compareMode, setCompareMode] = useState(false);
+  const [compareModels, setCompareModels] = useState<string[]>([]);
   const [systemPrompt, setSystemPrompt] = useState("You are a helpful assistant.");
   const [temperature, setTemperature] = useState(0.7);
   const [maxTokens, setMaxTokens] = useState(2048);
@@ -1126,6 +1436,8 @@ function Playground() {
   const [messages, setMessages] = useState<PlaygroundMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [editingIdx, setEditingIdx] = useState<number | null>(null);
+  const [editText, setEditText] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -1133,7 +1445,6 @@ function Playground() {
       const list = data?.data || [];
       setModels(list);
       if (list.length > 0 && !selectedModel) {
-        // Prefer a real model, not profile/tier
         const real = list.find((m: any) => !m.id.startsWith("profile:") && m.owned_by !== "tier");
         setSelectedModel(real?.id || list[0].id);
       }
@@ -1146,28 +1457,14 @@ function Playground() {
     }
   }, [messages]);
 
-  const send = async () => {
-    if (!input.trim() || sending || !selectedModel) return;
-    const userMsg = input.trim();
-    setInput("");
-    setSending(true);
-
-    const userEntry: PlaygroundMessage = { role: "user", content: userMsg };
-    const assistantEntry: PlaygroundMessage = { role: "assistant", content: "", model: selectedModel };
-    setMessages(prev => [...prev, userEntry, assistantEntry]);
-
-    const chatMessages: ChatMsg[] = [];
-    if (systemPrompt.trim()) {
-      chatMessages.push({ role: "system", content: systemPrompt.trim() });
-    }
-    // Include full conversation history (only completed messages, not the empty placeholder)
-    for (const m of messages) {
-      if (m.content && !m.error) {
-        chatMessages.push({ role: m.role, content: m.content });
-      }
-    }
-    chatMessages.push({ role: "user", content: userMsg });
-
+  // ── Core send-to-model function (reused by normal send, compare, regenerate) ──
+  const sendToModel = async (
+    model: string,
+    chatMessages: ChatMsg[],
+    onChunk: (chunk: string) => void,
+    onDone: (latencyMs: number, tokensIn?: number, tokensOut?: number, resolvedModel?: string) => void,
+    onError: (err: string) => void,
+  ) => {
     const startTime = Date.now();
     const token = getToken();
     const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -1178,7 +1475,7 @@ function Playground() {
         method: "POST",
         headers,
         body: JSON.stringify({
-          model: selectedModel,
+          model,
           messages: chatMessages,
           temperature,
           max_tokens: maxTokens,
@@ -1187,18 +1484,13 @@ function Playground() {
         }),
       });
 
-      const resolvedModel = resp.headers.get("x-resolved-model") || selectedModel;
+      const resolvedModel = resp.headers.get("x-resolved-model") || model;
 
       if (!resp.ok) {
         const errText = await resp.text();
         let errMsg = errText;
         try { errMsg = JSON.parse(errText)?.error?.message || errText; } catch {}
-        setMessages(prev => {
-          const copy = [...prev];
-          copy[copy.length - 1] = { ...copy[copy.length - 1], content: `Error: ${errMsg}`, error: true, model: resolvedModel };
-          return copy;
-        });
-        setSending(false);
+        onError(errMsg);
         return;
       }
 
@@ -1224,57 +1516,281 @@ function Playground() {
               const delta = parsed.choices?.[0]?.delta;
               if (delta?.content) {
                 outputTokens += Math.ceil(delta.content.length / 4);
-                setMessages(prev => {
-                  const copy = [...prev];
-                  copy[copy.length - 1] = {
-                    ...copy[copy.length - 1],
-                    content: copy[copy.length - 1].content + delta.content,
-                    model: resolvedModel,
-                  };
-                  return copy;
-                });
+                onChunk(delta.content);
               }
             } catch {}
           }
         }
-
-        setMessages(prev => {
-          const copy = [...prev];
-          copy[copy.length - 1] = {
-            ...copy[copy.length - 1],
-            latencyMs: Date.now() - startTime,
-            tokensOut: outputTokens,
-            tokensIn: undefined,
-            model: resolvedModel,
-          };
-          return copy;
-        });
+        onDone(Date.now() - startTime, undefined, outputTokens, resolvedModel);
       } else {
         const data = await resp.json();
         const content = data.choices?.[0]?.message?.content || "";
-        const usage = data.usage;
-        setMessages(prev => {
-          const copy = [...prev];
-          copy[copy.length - 1] = {
-            ...copy[copy.length - 1],
-            content,
-            model: resolvedModel,
-            latencyMs: Date.now() - startTime,
-            tokensIn: usage?.prompt_tokens,
-            tokensOut: usage?.completion_tokens,
-          };
-          return copy;
-        });
+        onChunk(content);
+        onDone(Date.now() - startTime, data.usage?.prompt_tokens, data.usage?.completion_tokens, resolvedModel);
       }
     } catch (e: any) {
-      setMessages(prev => {
-        const copy = [...prev];
-        copy[copy.length - 1] = { ...copy[copy.length - 1], content: `Network error: ${e.message || e}`, error: true };
-        return copy;
-      });
-    } finally {
-      setSending(false);
+      onError(`Network error: ${e.message || e}`);
     }
+  };
+
+  const buildChatHistory = (upToIdx?: number): ChatMsg[] => {
+    const msgs: ChatMsg[] = [];
+    if (systemPrompt.trim()) {
+      msgs.push({ role: "system", content: systemPrompt.trim() });
+    }
+    const history = upToIdx != null ? messages.slice(0, upToIdx) : messages;
+    for (const m of history) {
+      if (m.content && !m.error) {
+        msgs.push({ role: m.role, content: m.content });
+      }
+    }
+    return msgs;
+  };
+
+  // ── Normal send (single model) ──
+  const send = async () => {
+    if (!input.trim() || sending || !selectedModel) return;
+    const userMsg = input.trim();
+    setInput("");
+    setSending(true);
+
+    const userEntry: PlaygroundMessage = { role: "user", content: userMsg };
+    const assistantEntry: PlaygroundMessage = { role: "assistant", content: "", model: selectedModel };
+    setMessages(prev => [...prev, userEntry, assistantEntry]);
+
+    const chatMessages = buildChatHistory();
+    chatMessages.push({ role: "user", content: userMsg });
+
+    await sendToModel(
+      selectedModel,
+      chatMessages,
+      // onChunk
+      (chunk) => {
+        setMessages(prev => {
+          const copy = [...prev];
+          copy[copy.length - 1] = { ...copy[copy.length - 1], content: copy[copy.length - 1].content + chunk };
+          return copy;
+        });
+      },
+      // onDone
+      (latency, tokensIn, tokensOut, resolvedModel) => {
+        setMessages(prev => {
+          const copy = [...prev];
+          copy[copy.length - 1] = { ...copy[copy.length - 1], latencyMs: latency, tokensIn, tokensOut, model: resolvedModel || model };
+          return copy;
+        });
+      },
+      // onError
+      (err) => {
+        setMessages(prev => {
+          const copy = [...prev];
+          copy[copy.length - 1] = { ...copy[copy.length - 1], content: `Error: ${err}`, error: true };
+          return copy;
+        });
+      },
+    );
+    setSending(false);
+  };
+
+  // ── Compare send (multiple models side-by-side) ──
+  const sendCompare = async () => {
+    if (!input.trim() || sending || compareModels.length < 2) return;
+    const userMsg = input.trim();
+    setInput("");
+    setSending(true);
+
+    const responses = compareModels.map(m => ({ model: m, content: "", latencyMs: undefined as number | undefined, error: false }));
+    const userEntry: PlaygroundMessage = { role: "user", content: userMsg, responses };
+    setMessages(prev => [...prev, userEntry]);
+
+    const chatMessages = buildChatHistory();
+    chatMessages.push({ role: "user", content: userMsg });
+
+    // Fire all requests in parallel
+    await Promise.allSettled(compareModels.map(async (model, idx) => {
+      await sendToModel(
+        model,
+        chatMessages,
+        // onChunk — update specific response slot
+        (chunk) => {
+          setMessages(prev => {
+            const copy = [...prev];
+            const last = copy[copy.length - 1];
+            if (last.responses) {
+              const newResp = [...last.responses];
+              newResp[idx] = { ...newResp[idx], content: newResp[idx].content + chunk };
+              copy[copy.length - 1] = { ...last, responses: newResp };
+            }
+            return copy;
+          });
+        },
+        // onDone
+        (latency) => {
+          setMessages(prev => {
+            const copy = [...prev];
+            const last = copy[copy.length - 1];
+            if (last.responses) {
+              const newResp = [...last.responses];
+              newResp[idx] = { ...newResp[idx], latencyMs: latency };
+              copy[copy.length - 1] = { ...last, responses: newResp };
+            }
+            return copy;
+          });
+        },
+        // onError
+        (err) => {
+          setMessages(prev => {
+            const copy = [...prev];
+            const last = copy[copy.length - 1];
+            if (last.responses) {
+              const newResp = [...last.responses];
+              newResp[idx] = { ...newResp[idx], content: `Error: ${err}`, error: true };
+              copy[copy.length - 1] = { ...last, responses: newResp };
+            }
+            return copy;
+          });
+        },
+      );
+    }));
+    setSending(false);
+  };
+
+  // ── Regenerate last assistant message ──
+  const regenerate = async (idx: number) => {
+    if (sending) return;
+    setSending(true);
+    // Find the user message before this assistant message
+    const userMsg = messages[idx - 1];
+    if (!userMsg || userMsg.role !== "user") { setSending(false); return; }
+
+    // Build history up to (but not including) the user message
+    const chatMessages = buildChatHistory(idx - 1);
+    chatMessages.push({ role: "user", content: userMsg.content });
+
+    const model = messages[idx].model || selectedModel;
+
+    // Clear the assistant message
+    setMessages(prev => {
+      const copy = [...prev];
+      copy[idx] = { ...copy[idx], content: "", error: false };
+      return copy;
+    });
+
+    await sendToModel(
+      model,
+      chatMessages,
+      (chunk) => {
+        setMessages(prev => {
+          const copy = [...prev];
+          copy[idx] = { ...copy[idx], content: copy[idx].content + chunk };
+          return copy;
+        });
+      },
+      (latency, tokensIn, tokensOut, resolvedModel) => {
+        setMessages(prev => {
+          const copy = [...prev];
+          copy[idx] = { ...copy[idx], latencyMs: latency, tokensIn, tokensOut, model: resolvedModel || model };
+          return copy;
+        });
+      },
+      (err) => {
+        setMessages(prev => {
+          const copy = [...prev];
+          copy[idx] = { ...copy[idx], content: `Error: ${err}`, error: true };
+          return copy;
+        });
+      },
+    );
+    setSending(false);
+  };
+
+  // ── Edit a user message and re-send ──
+  const startEdit = (idx: number) => {
+    setEditingIdx(idx);
+    setEditText(messages[idx].content);
+  };
+
+  const saveEdit = async () => {
+    if (editingIdx == null || !editText.trim()) { setEditingIdx(null); return; }
+    const idx = editingIdx;
+    setEditingIdx(null);
+
+    // Update the user message, truncate everything after it
+    const updated = [...messages.slice(0, idx), { role: "user" as const, content: editText.trim() }];
+    // Add new assistant placeholder
+    const model = selectedModel;
+    updated.push({ role: "assistant", content: "", model });
+    setMessages(updated);
+
+    const chatMessages = buildChatHistory(idx);
+    chatMessages.push({ role: "user", content: editText.trim() });
+
+    setSending(true);
+    await sendToModel(
+      model,
+      chatMessages,
+      (chunk) => {
+        setMessages(prev => {
+          const copy = [...prev];
+          copy[copy.length - 1] = { ...copy[copy.length - 1], content: copy[copy.length - 1].content + chunk };
+          return copy;
+        });
+      },
+      (latency, tokensIn, tokensOut, resolvedModel) => {
+        setMessages(prev => {
+          const copy = [...prev];
+          copy[copy.length - 1] = { ...copy[copy.length - 1], latencyMs: latency, tokensIn, tokensOut, model: resolvedModel || model };
+          return copy;
+        });
+      },
+      (err) => {
+        setMessages(prev => {
+          const copy = [...prev];
+          copy[copy.length - 1] = { ...copy[copy.length - 1], content: `Error: ${err}`, error: true };
+          return copy;
+        });
+      },
+    );
+    setSending(false);
+  };
+
+  const copyMessage = (content: string) => {
+    navigator.clipboard.writeText(content);
+  };
+
+  // ── Prompt templates (localStorage) ──
+  const [templates, setTemplates] = useState<{ name: string; systemPrompt: string; temperature?: number; maxTokens?: number; topP?: number }[]>([]);
+  const [showTemplates, setShowTemplates] = useState(false);
+  const [newTemplateName, setNewTemplateName] = useState("");
+
+  useEffect(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem("playground-templates") || "[]");
+      setTemplates(Array.isArray(stored) ? stored : []);
+    } catch {}
+  }, []);
+
+  const saveTemplate = () => {
+    if (!newTemplateName.trim()) return;
+    const tmpl = { name: newTemplateName.trim(), systemPrompt, temperature, maxTokens, topP };
+    const updated = [...templates, tmpl];
+    setTemplates(updated);
+    localStorage.setItem("playground-templates", JSON.stringify(updated));
+    setNewTemplateName("");
+  };
+
+  const loadTemplate = (t: typeof templates[0]) => {
+    setSystemPrompt(t.systemPrompt);
+    if (t.temperature != null) setTemperature(t.temperature);
+    if (t.maxTokens != null) setMaxTokens(t.maxTokens);
+    if (t.topP != null) setTopP(t.topP);
+    setShowTemplates(false);
+  };
+
+  const deleteTemplate = (idx: number) => {
+    const updated = templates.filter((_, i) => i !== idx);
+    setTemplates(updated);
+    localStorage.setItem("playground-templates", JSON.stringify(updated));
   };
 
   const clearChat = () => {
@@ -1285,8 +1801,16 @@ function Playground() {
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
-      send();
+      compareMode ? sendCompare() : send();
     }
+  };
+
+  const toggleCompareModel = (modelId: string) => {
+    setCompareModels(prev => {
+      if (prev.includes(modelId)) return prev.filter(m => m !== modelId);
+      if (prev.length >= 3) return prev; // max 3
+      return [...prev, modelId];
+    });
   };
 
   const paramStyle: React.CSSProperties = {
@@ -1303,19 +1827,53 @@ function Playground() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 140px)", minHeight: 400 }}>
-      {/* Top bar: model selector + params toggle + clear */}
-      <div style={{ ...cardStyle, display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexShrink: 0 }}>
-        <select
-          value={selectedModel}
-          onChange={e => setSelectedModel(e.target.value)}
-          style={{ ...inputStyle, flex: 1, margin: 0, minWidth: 200, cursor: "pointer" }}
+      {/* Top bar: model selector + compare toggle + params toggle + clear */}
+      <div style={{ ...cardStyle, display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexShrink: 0, flexWrap: "wrap" }}>
+        {!compareMode ? (
+          <select
+            value={selectedModel}
+            onChange={e => setSelectedModel(e.target.value)}
+            style={{ ...inputStyle, flex: 1, margin: 0, minWidth: 200, cursor: "pointer" }}
+          >
+            {models.map((m: any) => (
+              <option key={m.id} value={m.id}>{m.id}</option>
+            ))}
+          </select>
+        ) : (
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 4 }}>
+              Compare ({compareModels.length}/3) — select models:
+            </div>
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", maxHeight: 80, overflowY: "auto" }}>
+              {models.map((m: any) => (
+                <button
+                  key={m.id}
+                  onClick={() => toggleCompareModel(m.id)}
+                  style={{
+                    ...filterBtn,
+                    fontSize: 11, padding: "2px 8px",
+                    background: compareModels.includes(m.id) ? "var(--accent)" : "var(--badge-bg)",
+                    color: compareModels.includes(m.id) ? "#fff" : "var(--text-secondary)",
+                  }}
+                  title={m.id}
+                >
+                  {m.id.length > 25 ? m.id.slice(0, 25) + "…" : m.id}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        <button
+          onClick={() => { setCompareMode(!compareMode); setCompareModels([]); }}
+          style={{
+            ...smBtnStyle, whiteSpace: "nowrap",
+            background: compareMode ? "var(--accent)" : "var(--badge-bg)",
+            color: compareMode ? "#fff" : "var(--text-secondary)",
+            fontWeight: 600,
+          }}
         >
-          {models.map((m: any) => (
-            <option key={m.id} value={m.id}>
-              {m.id}
-            </option>
-          ))}
-        </select>
+          {compareMode ? "✓ Compare" : "⇄ Compare"}
+        </button>
         <button onClick={() => setShowParams(!showParams)} style={{ ...smBtnStyle, whiteSpace: "nowrap" }}>
           {showParams ? "▲ Params" : "▼ Params"}
         </button>
@@ -1328,13 +1886,36 @@ function Playground() {
       {showParams && (
         <div style={{ ...cardStyle, marginBottom: 12, flexShrink: 0, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
           <div>
-            <label style={labelStyle}>System Prompt</label>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+              <label style={{ ...labelStyle, margin: 0 }}>System Prompt</label>
+              <button onClick={() => setShowTemplates(!showTemplates)} style={{ ...smBtnStyle, fontSize: 11 }}>
+                {showTemplates ? "Hide Templates" : "📋 Templates"}
+              </button>
+            </div>
             <textarea
               value={systemPrompt}
               onChange={e => setSystemPrompt(e.target.value)}
               style={{ ...inputStyle, minHeight: 60, resize: "vertical", margin: 0 }}
               placeholder="System instructions..."
             />
+            {showTemplates && (
+              <div style={{ marginTop: 8, padding: 8, borderRadius: 4, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
+                {templates.length > 0 && (
+                  <div style={{ marginBottom: 8 }}>
+                    {templates.map((t, i) => (
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 4 }}>
+                        <button onClick={() => loadTemplate(t)} style={{ ...smBtnStyle, flex: 1, textAlign: "left" }}>{t.name}</button>
+                        <button onClick={() => deleteTemplate(i)} style={{ ...smBtnStyle, color: "var(--danger)" }}>×</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 4 }}>
+                  <input placeholder="Template name..." value={newTemplateName} onChange={e => setNewTemplateName(e.target.value)} style={{ ...inputStyle, margin: 0, flex: 1, fontSize: 12 }} />
+                  <button onClick={saveTemplate} style={{ ...btnStyle, fontSize: 12, padding: "4px 12px" }}>Save Current</button>
+                </div>
+              </div>
+            )}
           </div>
           <div>
             <div style={paramStyle}>
@@ -1367,13 +1948,28 @@ function Playground() {
           <div style={{ textAlign: "center", color: "var(--text-secondary)", padding: "40px 20px" }}>
             <div style={{ fontSize: 40, marginBottom: 8 }}>💬</div>
             <div>Send a message to test the API</div>
-            <div style={{ fontSize: 12, marginTop: 4 }}>Model: {selectedModel || "—"}</div>
+            <div style={{ fontSize: 12, marginTop: 4 }}>
+              {compareMode ? `Comparing ${compareModels.length} models` : `Model: ${selectedModel || "—"}`}
+            </div>
           </div>
         )}
         {messages.map((m, i) => (
-          <PlaygroundBubble key={i} msg={m} />
+          <PlaygroundBubble
+            key={i}
+            msg={m}
+            index={i}
+            sending={sending}
+            onRegenerate={() => regenerate(i)}
+            onEdit={() => startEdit(i)}
+            onSaveEdit={saveEdit}
+            onCancelEdit={() => setEditingIdx(null)}
+            editing={editingIdx === i}
+            editText={editText}
+            onEditText={setEditText}
+            onCopy={() => copyMessage(m.content)}
+          />
         ))}
-        {sending && messages.length > 0 && !messages[messages.length - 1].content && (
+        {sending && messages.length > 0 && !messages[messages.length - 1].content && !messages[messages.length - 1].responses && (
           <div style={{ color: "var(--text-secondary)", fontSize: 13, padding: "4px 12px" }}>
             <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>⟳</span> Waiting for response...
           </div>
@@ -1386,19 +1982,35 @@ function Playground() {
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder="Type a message... (Ctrl+Enter to send)"
+          placeholder={compareMode ? "Type a message to send to all selected models... (Ctrl+Enter)" : "Type a message... (Ctrl+Enter to send)"}
           style={{ ...inputStyle, flex: 1, margin: 0, minHeight: 48, maxHeight: 200, resize: "vertical" }}
           disabled={sending}
         />
-        <button onClick={send} disabled={sending || !input.trim()} style={{ ...btnStyle, opacity: sending || !input.trim() ? 0.5 : 1, whiteSpace: "nowrap", alignSelf: "stretch" }}>
-          {sending ? "Sending..." : "Send"}
+        <button
+          onClick={compareMode ? sendCompare : send}
+          disabled={sending || !input.trim() || (compareMode && compareModels.length < 2)}
+          style={{ ...btnStyle, opacity: sending || !input.trim() || (compareMode && compareModels.length < 2) ? 0.5 : 1, whiteSpace: "nowrap", alignSelf: "stretch" }}
+        >
+          {sending ? "Sending..." : compareMode ? "Send to All" : "Send"}
         </button>
       </div>
     </div>
   );
 }
 
-function PlaygroundBubble({ msg }: { msg: PlaygroundMessage }) {
+function PlaygroundBubble({ msg, index, sending, onRegenerate, onEdit, onSaveEdit, onCancelEdit, editing, editText, onEditText, onCopy }: {
+  msg: PlaygroundMessage;
+  index: number;
+  sending: boolean;
+  onRegenerate: () => void;
+  onEdit: () => void;
+  onSaveEdit: () => void;
+  onCancelEdit: () => void;
+  editing: boolean;
+  editText: string;
+  onEditText: (text: string) => void;
+  onCopy: () => void;
+}) {
   const isUser = msg.role === "user";
 
   const containerStyle: React.CSSProperties = {
@@ -1426,21 +2038,197 @@ function PlaygroundBubble({ msg }: { msg: PlaygroundMessage }) {
     border: "1px solid var(--danger)",
   };
 
+  const hoverBtnStyle: React.CSSProperties = {
+    border: "none", background: "transparent", cursor: "pointer",
+    fontSize: 11, color: "var(--text-secondary)", padding: "2px 6px", borderRadius: 4,
+  };
+
+  // ── Compare mode: multiple responses ──
+  if (msg.responses) {
+    return (
+      <div style={{ ...containerStyle, flexDirection: "column", alignItems: "stretch" }}>
+        {/* User message */}
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <div style={{ ...bubbleStyle, maxWidth: "80%" }}>{msg.content}</div>
+        </div>
+        {/* Side-by-side responses */}
+        <div style={{ display: "flex", gap: 8, marginTop: 8, overflowX: "auto" }}>
+          {msg.responses.map((r, i) => (
+            <div key={i} style={{
+              flex: 1, minWidth: 250, maxWidth: 500,
+              padding: 10, borderRadius: 8,
+              background: r.error ? "rgba(255,50,50,0.1)" : "var(--badge-bg)",
+              border: "1px solid var(--border)",
+            }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "var(--accent)", marginBottom: 6, wordBreak: "break-all" }}>
+                {r.model}
+                {r.latencyMs != null && <span style={{ color: "var(--text-secondary)", fontWeight: 400 }}> · {r.latencyMs}ms</span>}
+              </div>
+              <div style={{ fontSize: 13, color: r.error ? "var(--danger)" : "var(--text)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                {r.content || (r.error ? "" : "…")}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={containerStyle}>
       <div style={{ display: "flex", flexDirection: "column", alignItems: isUser ? "flex-end" : "flex-start", gap: 4, maxWidth: "80%" }}>
-        <div style={msg.error ? errorStyle : bubbleStyle}>
-          {msg.content || (msg.error ? "" : "…")}
-        </div>
-        {!isUser && !msg.error && (
-          <div style={{ display: "flex", gap: 8, fontSize: 11, color: "var(--text-secondary)", padding: "0 4px", flexWrap: "wrap" }}>
-            {msg.model && msg.model !== "auto" && <span>model: {msg.model}</span>}
-            {msg.latencyMs != null && <span>{msg.latencyMs}ms</span>}
-            {msg.tokensIn != null && <span>in: {msg.tokensIn}</span>}
-            {msg.tokensOut != null && <span>out: {msg.tokensOut}</span>}
+        {/* Edit mode for user messages */}
+        {editing && isUser ? (
+          <div style={{ maxWidth: "80%", display: "flex", flexDirection: "column", gap: 4 }}>
+            <textarea
+              value={editText}
+              onChange={e => onEditText(e.target.value)}
+              style={{ ...inputStyle, margin: 0, minHeight: 60, background: "var(--surface)" }}
+              autoFocus
+            />
+            <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+              <button onClick={onCancelEdit} style={smBtnStyle}>Cancel</button>
+              <button onClick={onSaveEdit} style={btnStyle}>Save & Resend</button>
+            </div>
           </div>
+        ) : (
+          <>
+            <div style={msg.error ? errorStyle : bubbleStyle}>
+              {msg.content || (msg.error ? "" : "…")}
+            </div>
+            {/* Hover toolbar */}
+            <div style={{ display: "flex", gap: 2, opacity: 0.7 }}>
+              <button onClick={onCopy} style={hoverBtnStyle} title="Copy">⧉</button>
+              {isUser && (
+                <button onClick={onEdit} style={hoverBtnStyle} title="Edit">✎</button>
+              )}
+              {!isUser && !msg.error && msg.content && (
+                <button onClick={onRegenerate} disabled={sending} style={{ ...hoverBtnStyle, opacity: sending ? 0.4 : 0.7 }} title="Regenerate">↻</button>
+              )}
+            </div>
+            {!isUser && !msg.error && (
+              <div style={{ display: "flex", gap: 8, fontSize: 11, color: "var(--text-secondary)", padding: "0 4px", flexWrap: "wrap" }}>
+                {msg.model && msg.model !== "auto" && <span>model: {msg.model}</span>}
+                {msg.latencyMs != null && <span>{msg.latencyMs}ms</span>}
+                {msg.tokensIn != null && <span>in: {msg.tokensIn}</span>}
+                {msg.tokensOut != null && <span>out: {msg.tokensOut}</span>}
+              </div>
+            )}
+          </>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── Logs ──
+
+function Logs() {
+  const [logs, setLogs] = useState<any[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0);
+  const [providerFilter, setProviderFilter] = useState("");
+  const [providers, setProviders] = useState<any[]>([]);
+  const pageSize = 50;
+
+  useEffect(() => {
+    api("/admin/providers").then(setProviders).catch(() => {});
+  }, []);
+
+  const load = useCallback(async () => {
+    try {
+      const params = new URLSearchParams({ limit: String(pageSize), offset: String(page * pageSize) });
+      if (providerFilter) params.set("providerId", providerFilter);
+      const data = await api(`/admin/logs?${params}`);
+      setLogs(data.logs || []);
+      setTotal(data.total || 0);
+    } catch { /* ignore */ }
+  }, [page, providerFilter]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const totalPages = Math.ceil(total / pageSize);
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+        <h2 style={{ margin: 0, color: "var(--text)" }}>Request Logs ({total})</h2>
+        <select
+          value={providerFilter}
+          onChange={e => { setProviderFilter(e.target.value); setPage(0); }}
+          style={{ ...inputStyle, margin: 0, maxWidth: 200, cursor: "pointer" }}
+        >
+          <option value="">All Providers</option>
+          {providers.map(p => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+        <button onClick={load} style={smBtnStyle}>↻ Refresh</button>
+      </div>
+
+      {logs.length === 0 ? (
+        <div style={{ textAlign: "center", color: "var(--text-secondary)", padding: 40 }}>
+          <div style={{ fontSize: 32, marginBottom: 8 }}>📋</div>
+          No requests logged yet
+        </div>
+      ) : (
+        <>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ borderBottom: "2px solid var(--border)", textAlign: "left" }}>
+                  <th style={{ padding: "8px 12px", color: "var(--text-secondary)" }}>Time</th>
+                  <th style={{ padding: "8px 12px", color: "var(--text-secondary)" }}>Model</th>
+                  <th style={{ padding: "8px 12px", color: "var(--text-secondary)" }}>Provider</th>
+                  <th style={{ padding: "8px 12px", color: "var(--text-secondary)" }}>Tier</th>
+                  <th style={{ padding: "8px 12px", color: "var(--text-secondary)", textAlign: "right" }}>Tokens (in/out)</th>
+                  <th style={{ padding: "8px 12px", color: "var(--text-secondary)", textAlign: "right" }}>Latency</th>
+                </tr>
+              </thead>
+              <tbody>
+                {logs.map((log, i) => {
+                  const provName = providers.find(p => p.id === log.providerId)?.name || `#${log.providerId}`;
+                  return (
+                    <tr key={i} style={{ borderBottom: "1px solid var(--border)" }}>
+                      <td style={{ padding: "6px 12px", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>
+                        {new Date(log.timestamp).toLocaleString()}
+                      </td>
+                      <td style={{ padding: "6px 12px", color: "var(--text)", fontFamily: "monospace", fontSize: 12 }}>
+                        {log.modelId}
+                      </td>
+                      <td style={{ padding: "6px 12px", color: "var(--text)" }}>{provName}</td>
+                      <td style={{ padding: "6px 12px" }}>
+                        <span style={{ ...badgeStyle, background: "var(--badge-bg)" }}>{log.tier}</span>
+                      </td>
+                      <td style={{ padding: "6px 12px", color: "var(--text-secondary)", textAlign: "right", whiteSpace: "nowrap" }}>
+                        {log.inputTokens} / {log.outputTokens}
+                      </td>
+                      <td style={{ padding: "6px 12px", color: "var(--text-secondary)", textAlign: "right", whiteSpace: "nowrap" }}>
+                        {log.latencyMs}ms
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Pagination */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16 }}>
+            <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+              Page {page + 1} of {totalPages || 1} — Showing {logs.length} of {total}
+            </span>
+            <div style={{ display: "flex", gap: 4 }}>
+              <button onClick={() => setPage(Math.max(0, page - 1))} disabled={page === 0} style={{ ...smBtnStyle, opacity: page === 0 ? 0.4 : 1 }}>
+                ← Prev
+              </button>
+              <button onClick={() => setPage(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1} style={{ ...smBtnStyle, opacity: page >= totalPages - 1 ? 0.4 : 1 }}>
+                Next →
+              </button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -1648,49 +2436,64 @@ function App() {
     setLogged(false);
   };
 
+  const navItems = [
+    { key: "providers", icon: "🔌", label: "Providers" },
+    { key: "playground", icon: "💬", label: "Playground" },
+    { key: "tiers", icon: "📊", label: "Tiers" },
+    { key: "stats", icon: "📈", label: "Stats" },
+    { key: "logs", icon: "📋", label: "Logs" },
+    { key: "users", icon: "👤", label: "Users" },
+  ];
+
+  const navBtnStyle = (active: boolean): React.CSSProperties => ({
+    display: "flex", alignItems: "center", gap: 10,
+    padding: "10px 16px", border: "none", borderRadius: 6,
+    background: active ? "var(--accent)" : "transparent",
+    color: active ? "#fff" : "var(--text-secondary)",
+    cursor: "pointer", fontSize: 14, fontWeight: active ? 600 : 400,
+    textAlign: "left" as const, width: "100%",
+  });
+
   return (
-    <div style={{ fontFamily: "system-ui, sans-serif", maxWidth: 1200, margin: "0 auto", padding: 20, background: "var(--bg)", color: "var(--text)", minHeight: "100vh" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <h1 style={{ color: "var(--text)" }}>token-pool</h1>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+    <div style={{ fontFamily: "system-ui, sans-serif", display: "flex", minHeight: "100vh", background: "var(--bg)", color: "var(--text)" }}>
+      {/* Sidebar */}
+      <div className="tp-sidebar" style={{
+        width: 200, flexShrink: 0, borderRight: "1px solid var(--border)",
+        background: "var(--surface)", padding: 16, display: "flex", flexDirection: "column",
+        position: "sticky", top: 0, height: "100vh",
+      }}>
+        <div style={{ marginBottom: 24, paddingLeft: 4 }}>
+          <h1 style={{ color: "var(--text)", fontSize: 20, margin: 0 }}>token-pool</h1>
+        </div>
+        <div className="tp-nav-items" style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1 }}>
+          {navItems.map(item => (
+            <button key={item.key} onClick={() => setTab(item.key)} style={navBtnStyle(tab === item.key)}>
+              <span style={{ fontSize: 16 }}>{item.icon}</span>
+              {item.label}
+            </button>
+          ))}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
           <button
             onClick={toggle}
-            style={{
-              ...smBtnStyle,
-              fontSize: 18,
-              padding: "4px 10px",
-              lineHeight: 1,
-            }}
+            style={{ ...smBtnStyle, fontSize: 18, padding: "6px 12px", lineHeight: 1, textAlign: "center" }}
             title="Toggle dark mode"
           >
             {theme === "dark" ? "☀️" : "🌙"}
           </button>
-          <button onClick={logout} style={btnStyle}>Logout</button>
+          <button onClick={logout} style={{ ...btnStyle, fontSize: 13 }}>Logout</button>
         </div>
       </div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 20, borderBottom: "2px solid var(--border)" }}>
-        {["providers", "playground", "tiers", "stats", "users"].map(key => (
-          <button
-            key={key}
-            onClick={() => setTab(key)}
-            style={{
-              padding: "8px 16px",
-              border: "none",
-              background: tab === key ? "var(--accent)" : "transparent",
-              color: tab === key ? "#fff" : "var(--text-secondary)",
-              cursor: "pointer",
-              borderRadius: "4px 4px 0 0",
-            }}
-          >
-            {key.charAt(0).toUpperCase() + key.slice(1)}
-          </button>
-        ))}
+
+      {/* Main content */}
+      <div className="tp-main" style={{ flex: 1, padding: 20, overflow: "auto", minWidth: 0 }}>
+        {tab === "providers" && <Providers />}
+        {tab === "playground" && <Playground />}
+        {tab === "tiers" && <Tiers />}
+        {tab === "stats" && <Stats />}
+        {tab === "logs" && <Logs />}
+        {tab === "users" && <Users />}
       </div>
-      {tab === "providers" && <Providers />}
-      {tab === "playground" && <Playground />}
-      {tab === "tiers" && <Tiers />}
-      {tab === "stats" && <Stats />}
-      {tab === "users" && <Users />}
     </div>
   );
 }
@@ -1719,6 +2522,7 @@ const smBtnStyle: React.CSSProperties = {
 
 const cardStyle: React.CSSProperties = {
   padding: 16, border: "1px solid var(--border)", borderRadius: 8, background: "var(--surface)",
+  boxShadow: "var(--shadow)",
 };
 
 const badgeStyle: React.CSSProperties = {

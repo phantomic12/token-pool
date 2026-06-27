@@ -43,7 +43,8 @@ export class UsageTracker {
       `SELECT COUNT(*) as count,
               COALESCE(SUM(input_tokens), 0) as inputTokens,
               COALESCE(SUM(output_tokens), 0) as outputTokens,
-              COALESCE(SUM(cost_usd), 0) as totalCost
+              COALESCE(SUM(cost_usd), 0) as totalCost,
+              SUM(CASE WHEN output_tokens = 0 THEN 1 ELSE 0 END) as errorCount
        FROM usage_events WHERE timestamp >= ?`
     ).get(since);
 
@@ -75,6 +76,16 @@ export class UsageTracker {
        GROUP BY user_id ORDER BY count DESC`
     ).all(since);
 
+    const byModel = this.db.prepare(
+      `SELECT model_id as modelId,
+              COUNT(*) as count,
+              SUM(input_tokens) as inputTokens,
+              SUM(output_tokens) as outputTokens,
+              AVG(latency_ms) as avgLatencyMs
+       FROM usage_events WHERE timestamp >= ?
+       GROUP BY model_id ORDER BY count DESC`
+    ).all(since);
+
     // Daily series for charts
     const daily = this.db.prepare(
       `SELECT DATE(timestamp) as date,
@@ -94,7 +105,7 @@ export class UsageTracker {
        FROM usage_events WHERE tier = 'fusion' AND timestamp >= ?`
     ).get(since);
 
-    return { total, byProvider, byTier, byUser, daily, fusionStats };
+    return { total, byProvider, byTier, byUser, byModel, daily, fusionStats };
   }
 
   /**
@@ -113,5 +124,31 @@ export class UsageTracker {
     ).join("\n");
 
     return header + lines;
+  }
+
+  /**
+   * Get individual request logs (paginated).
+   */
+  getLogs(limit: number = 50, offset: number = 0, providerId?: number) {
+    const since = new Date(Date.now() - 30 * 86400000).toISOString();
+    const params: any[] = [since];
+    let filter = "";
+    if (providerId) {
+      filter = " AND provider_id = ?";
+      params.push(providerId);
+    }
+    const rows = this.db.prepare(
+      `SELECT id, user_id as userId, provider_id as providerId, model_id as modelId, tier,
+              input_tokens as inputTokens, output_tokens as outputTokens, latency_ms as latencyMs,
+              cost_usd as costUsd, timestamp
+       FROM usage_events WHERE timestamp >= ?${filter}
+       ORDER BY timestamp DESC LIMIT ? OFFSET ?`
+    ).all(...params, limit, offset) as any[];
+
+    const countRow = this.db.prepare(
+      `SELECT COUNT(*) as total FROM usage_events WHERE timestamp >= ?${filter}`
+    ).get(...params) as { total: number };
+
+    return { logs: rows, total: countRow.total };
   }
 }

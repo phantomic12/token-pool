@@ -618,6 +618,95 @@ export class TokenPoolServer {
       return this.guard.getProviderKeyUsage(provider);
     });
 
+    // ── Provider health check — send minimal request to test connectivity ──
+    this.fastify.post("/v1/admin/providers/:id/test", adminGuard, async (request, reply) => {
+      const id = parseInt((request.params as any).id, 10);
+      const provider = this.providers.get(id);
+      if (!provider) {
+        return reply.code(404).send({ error: { message: "not found", type: "not_found", code: null } });
+      }
+      if (!provider.enabled) {
+        return reply.code(400).send({ error: { message: "provider is disabled", type: "invalid_request", code: null } });
+      }
+
+      const body = request.body as { model?: string } | null;
+      const models = this.providers.listModels(provider.id);
+      const modelId = body?.model || models[0]?.modelId;
+      if (!modelId) {
+        return reply.code(400).send({ error: { message: "no models configured for this provider", type: "invalid_request", code: null } });
+      }
+
+      const decision = this.guard.tryAcquire(provider, 10);
+      if (!decision.allowed || !decision.key) {
+        return reply.code(429).send({ error: { message: `rate limit: ${decision.reason}`, type: "rate_limit_exceeded", code: null } });
+      }
+
+      const startTime = Date.now();
+      try {
+        const testBody: ChatCompletionRequest = {
+          model: modelId,
+          messages: [{ role: "user", content: "Hi" }],
+          max_tokens: 1,
+          stream: false,
+        };
+        const result = await this.proxy.forwardBuffered(provider, modelId, testBody, decision.key);
+        const latency = Date.now() - startTime;
+        this.guard.clearBackoff(decision.key.id);
+        return { healthy: true, model: modelId, latencyMs: latency, response: result.response };
+      } catch (err: any) {
+        const latency = Date.now() - startTime;
+        if (err instanceof ProxyError && err.statusCode === 429) {
+          this.guard.markBackoff(decision.key.id);
+        }
+        return reply.code(502).send({
+          healthy: false,
+          model: modelId,
+          latencyMs: latency,
+          error: err.message,
+          statusCode: err instanceof ProxyError ? err.statusCode : undefined,
+        });
+      }
+    });
+
+    // ── Test all providers (batch health check) ──
+    this.fastify.post("/v1/admin/providers/test-all", adminGuard, async () => {
+      const allProviders = this.providers.list().filter(p => p.enabled);
+      const results: Array<{ providerId: number; providerName: string; healthy: boolean; model?: string; latencyMs?: number; error?: string }> = [];
+
+      await Promise.allSettled(allProviders.map(async (provider) => {
+        const models = this.providers.listModels(provider.id);
+        const modelId = models[0]?.modelId;
+        if (!modelId) {
+          results.push({ providerId: provider.id, providerName: provider.name, healthy: false, error: "no models configured" });
+          return;
+        }
+        const decision = this.guard.tryAcquire(provider, 10);
+        if (!decision.allowed || !decision.key) {
+          results.push({ providerId: provider.id, providerName: provider.name, healthy: false, error: `rate limit: ${decision.reason}` });
+          return;
+        }
+        const startTime = Date.now();
+        try {
+          const testBody: ChatCompletionRequest = {
+            model: modelId,
+            messages: [{ role: "user", content: "Hi" }],
+            max_tokens: 1,
+            stream: false,
+          };
+          await this.proxy.forwardBuffered(provider, modelId, testBody, decision.key);
+          this.guard.clearBackoff(decision.key.id);
+          results.push({ providerId: provider.id, providerName: provider.name, healthy: true, model: modelId, latencyMs: Date.now() - startTime });
+        } catch (err: any) {
+          if (err instanceof ProxyError && err.statusCode === 429) {
+            this.guard.markBackoff(decision.key.id);
+          }
+          results.push({ providerId: provider.id, providerName: provider.name, healthy: false, model: modelId, latencyMs: Date.now() - startTime, error: err.message });
+        }
+      }));
+
+      return results;
+    });
+
     // Tiers
     this.fastify.get("/v1/admin/tiers", adminGuard, async () => {
       return this.db.prepare("SELECT * FROM tiers ORDER BY id").all();
@@ -788,6 +877,15 @@ export class TokenPoolServer {
       reply.header("Content-Type", "text/csv");
       reply.header("Content-Disposition", `attachment; filename="token-pool-usage-${days}d.csv"`);
       return csv;
+    });
+
+    // Request logs (paginated)
+    this.fastify.get("/v1/admin/logs", adminGuard, async (request) => {
+      const q = request.query as any;
+      const limit = Math.min(parseInt(q?.limit ?? "50", 10), 200);
+      const offset = parseInt(q?.offset ?? "0", 10);
+      const providerId = q?.providerId ? parseInt(q.providerId, 10) : undefined;
+      return this.usage.getLogs(limit, offset, providerId);
     });
 
     // User management (admin only)

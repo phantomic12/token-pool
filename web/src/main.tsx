@@ -36,6 +36,10 @@ body { background: var(--bg); color: var(--text); margin: 0; }
   from { opacity: 0; transform: translateX(20px); }
   to { opacity: 1; transform: translateX(0); }
 }
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
 `;
 
 // Inject the style element + apply theme class before React renders
@@ -1092,6 +1096,355 @@ function Stats() {
   );
 }
 
+// ── Playground ──
+
+interface ChatMsg {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+interface PlaygroundMessage {
+  role: "user" | "assistant";
+  content: string;
+  model?: string;
+  latencyMs?: number;
+  tokensIn?: number;
+  tokensOut?: number;
+  error?: boolean;
+}
+
+function Playground() {
+  const [models, setModels] = useState<any[]>([]);
+  const [selectedModel, setSelectedModel] = useState("");
+  const [systemPrompt, setSystemPrompt] = useState("You are a helpful assistant.");
+  const [temperature, setTemperature] = useState(0.7);
+  const [maxTokens, setMaxTokens] = useState(2048);
+  const [topP, setTopP] = useState(1);
+  const [stream, setStream] = useState(true);
+  const [showParams, setShowParams] = useState(false);
+
+  const [messages, setMessages] = useState<PlaygroundMessage[]>([]);
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    api("/models").then((data: any) => {
+      const list = data?.data || [];
+      setModels(list);
+      if (list.length > 0 && !selectedModel) {
+        // Prefer a real model, not profile/tier
+        const real = list.find((m: any) => !m.id.startsWith("profile:") && m.owned_by !== "tier");
+        setSelectedModel(real?.id || list[0].id);
+      }
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  const send = async () => {
+    if (!input.trim() || sending || !selectedModel) return;
+    const userMsg = input.trim();
+    setInput("");
+    setSending(true);
+
+    const userEntry: PlaygroundMessage = { role: "user", content: userMsg };
+    const assistantEntry: PlaygroundMessage = { role: "assistant", content: "", model: selectedModel };
+    setMessages(prev => [...prev, userEntry, assistantEntry]);
+
+    const chatMessages: ChatMsg[] = [];
+    if (systemPrompt.trim()) {
+      chatMessages.push({ role: "system", content: systemPrompt.trim() });
+    }
+    // Include full conversation history (only completed messages, not the empty placeholder)
+    for (const m of messages) {
+      if (m.content && !m.error) {
+        chatMessages.push({ role: m.role, content: m.content });
+      }
+    }
+    chatMessages.push({ role: "user", content: userMsg });
+
+    const startTime = Date.now();
+    const token = getToken();
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+
+    try {
+      const resp = await fetch("/v1/chat/completions", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: selectedModel,
+          messages: chatMessages,
+          temperature,
+          max_tokens: maxTokens,
+          top_p: topP,
+          stream,
+        }),
+      });
+
+      const resolvedModel = resp.headers.get("x-resolved-model") || selectedModel;
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        let errMsg = errText;
+        try { errMsg = JSON.parse(errText)?.error?.message || errText; } catch {}
+        setMessages(prev => {
+          const copy = [...prev];
+          copy[copy.length - 1] = { ...copy[copy.length - 1], content: `Error: ${errMsg}`, error: true, model: resolvedModel };
+          return copy;
+        });
+        setSending(false);
+        return;
+      }
+
+      if (stream) {
+        const reader = resp.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let outputTokens = 0;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            const data = line.slice(6).trim();
+            if (data === "[DONE]") continue;
+            try {
+              const parsed = JSON.parse(data);
+              const delta = parsed.choices?.[0]?.delta;
+              if (delta?.content) {
+                outputTokens += Math.ceil(delta.content.length / 4);
+                setMessages(prev => {
+                  const copy = [...prev];
+                  copy[copy.length - 1] = {
+                    ...copy[copy.length - 1],
+                    content: copy[copy.length - 1].content + delta.content,
+                    model: resolvedModel,
+                  };
+                  return copy;
+                });
+              }
+            } catch {}
+          }
+        }
+
+        setMessages(prev => {
+          const copy = [...prev];
+          copy[copy.length - 1] = {
+            ...copy[copy.length - 1],
+            latencyMs: Date.now() - startTime,
+            tokensOut: outputTokens,
+            tokensIn: undefined,
+            model: resolvedModel,
+          };
+          return copy;
+        });
+      } else {
+        const data = await resp.json();
+        const content = data.choices?.[0]?.message?.content || "";
+        const usage = data.usage;
+        setMessages(prev => {
+          const copy = [...prev];
+          copy[copy.length - 1] = {
+            ...copy[copy.length - 1],
+            content,
+            model: resolvedModel,
+            latencyMs: Date.now() - startTime,
+            tokensIn: usage?.prompt_tokens,
+            tokensOut: usage?.completion_tokens,
+          };
+          return copy;
+        });
+      }
+    } catch (e: any) {
+      setMessages(prev => {
+        const copy = [...prev];
+        copy[copy.length - 1] = { ...copy[copy.length - 1], content: `Network error: ${e.message || e}`, error: true };
+        return copy;
+      });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const clearChat = () => {
+    setMessages([]);
+    setInput("");
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      send();
+    }
+  };
+
+  const paramStyle: React.CSSProperties = {
+    display: "flex", alignItems: "center", gap: 8, marginBottom: 8,
+  };
+
+  const valueLabelStyle: React.CSSProperties = {
+    fontSize: 12, color: "var(--text-secondary)", minWidth: 36, textAlign: "right" as const,
+  };
+
+  const rangeStyle: React.CSSProperties = {
+    flex: 1, cursor: "pointer", accentColor: "var(--accent)" as any,
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 140px)", minHeight: 400 }}>
+      {/* Top bar: model selector + params toggle + clear */}
+      <div style={{ ...cardStyle, display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexShrink: 0 }}>
+        <select
+          value={selectedModel}
+          onChange={e => setSelectedModel(e.target.value)}
+          style={{ ...inputStyle, flex: 1, margin: 0, minWidth: 200, cursor: "pointer" }}
+        >
+          {models.map((m: any) => (
+            <option key={m.id} value={m.id}>
+              {m.id}
+            </option>
+          ))}
+        </select>
+        <button onClick={() => setShowParams(!showParams)} style={{ ...smBtnStyle, whiteSpace: "nowrap" }}>
+          {showParams ? "▲ Params" : "▼ Params"}
+        </button>
+        <button onClick={clearChat} style={{ ...smBtnStyle, whiteSpace: "nowrap", color: messages.length ? "var(--danger)" : "var(--text-secondary)" }}>
+          Clear
+        </button>
+      </div>
+
+      {/* Params panel (collapsible) */}
+      {showParams && (
+        <div style={{ ...cardStyle, marginBottom: 12, flexShrink: 0, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          <div>
+            <label style={labelStyle}>System Prompt</label>
+            <textarea
+              value={systemPrompt}
+              onChange={e => setSystemPrompt(e.target.value)}
+              style={{ ...inputStyle, minHeight: 60, resize: "vertical", margin: 0 }}
+              placeholder="System instructions..."
+            />
+          </div>
+          <div>
+            <div style={paramStyle}>
+              <label style={{ ...labelStyle, margin: 0, minWidth: 100 }}>Temperature</label>
+              <input type="range" min="0" max="2" step="0.1" value={temperature} onChange={e => setTemperature(Number(e.target.value))} style={rangeStyle} />
+              <span style={valueLabelStyle}>{temperature.toFixed(1)}</span>
+            </div>
+            <div style={paramStyle}>
+              <label style={{ ...labelStyle, margin: 0, minWidth: 100 }}>Max Tokens</label>
+              <input type="number" min="1" max="128000" value={maxTokens} onChange={e => setMaxTokens(Number(e.target.value))} style={{ ...inputStyle, margin: 0, flex: 1 }} />
+            </div>
+            <div style={paramStyle}>
+              <label style={{ ...labelStyle, margin: 0, minWidth: 100 }}>Top P</label>
+              <input type="range" min="0" max="1" step="0.05" value={topP} onChange={e => setTopP(Number(e.target.value))} style={rangeStyle} />
+              <span style={valueLabelStyle}>{topP.toFixed(2)}</span>
+            </div>
+            <div style={{ ...paramStyle, marginTop: 4 }}>
+              <label style={{ ...labelStyle, margin: 0, minWidth: 100, cursor: "pointer" }}>
+                <input type="checkbox" checked={stream} onChange={e => setStream(e.target.checked)} style={{ marginRight: 6, accentColor: "var(--accent)" as any }} />
+                Stream
+              </label>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Messages area */}
+      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: 4, marginBottom: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+        {messages.length === 0 && (
+          <div style={{ textAlign: "center", color: "var(--text-secondary)", padding: "40px 20px" }}>
+            <div style={{ fontSize: 40, marginBottom: 8 }}>💬</div>
+            <div>Send a message to test the API</div>
+            <div style={{ fontSize: 12, marginTop: 4 }}>Model: {selectedModel || "—"}</div>
+          </div>
+        )}
+        {messages.map((m, i) => (
+          <PlaygroundBubble key={i} msg={m} />
+        ))}
+        {sending && messages.length > 0 && !messages[messages.length - 1].content && (
+          <div style={{ color: "var(--text-secondary)", fontSize: 13, padding: "4px 12px" }}>
+            <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>⟳</span> Waiting for response...
+          </div>
+        )}
+      </div>
+
+      {/* Input area */}
+      <div style={{ ...cardStyle, flexShrink: 0, display: "flex", gap: 8, alignItems: "flex-end" }}>
+        <textarea
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder="Type a message... (Ctrl+Enter to send)"
+          style={{ ...inputStyle, flex: 1, margin: 0, minHeight: 48, maxHeight: 200, resize: "vertical" }}
+          disabled={sending}
+        />
+        <button onClick={send} disabled={sending || !input.trim()} style={{ ...btnStyle, opacity: sending || !input.trim() ? 0.5 : 1, whiteSpace: "nowrap", alignSelf: "stretch" }}>
+          {sending ? "Sending..." : "Send"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PlaygroundBubble({ msg }: { msg: PlaygroundMessage }) {
+  const isUser = msg.role === "user";
+
+  const containerStyle: React.CSSProperties = {
+    display: "flex",
+    justifyContent: isUser ? "flex-end" : "flex-start",
+    animation: "slideIn 0.15s ease-out",
+  };
+
+  const bubbleStyle: React.CSSProperties = {
+    maxWidth: "80%",
+    padding: "10px 14px",
+    borderRadius: 12,
+    background: isUser ? "var(--accent)" : "var(--badge-bg)",
+    color: isUser ? "#fff" : "var(--text)",
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
+    fontSize: 14,
+    lineHeight: 1.5,
+  };
+
+  const errorStyle: React.CSSProperties = {
+    ...bubbleStyle,
+    background: "rgba(255,50,50,0.15)",
+    color: "var(--danger)",
+    border: "1px solid var(--danger)",
+  };
+
+  return (
+    <div style={containerStyle}>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: isUser ? "flex-end" : "flex-start", gap: 4, maxWidth: "80%" }}>
+        <div style={msg.error ? errorStyle : bubbleStyle}>
+          {msg.content || (msg.error ? "" : "…")}
+        </div>
+        {!isUser && !msg.error && (
+          <div style={{ display: "flex", gap: 8, fontSize: 11, color: "var(--text-secondary)", padding: "0 4px", flexWrap: "wrap" }}>
+            {msg.model && msg.model !== "auto" && <span>model: {msg.model}</span>}
+            {msg.latencyMs != null && <span>{msg.latencyMs}ms</span>}
+            {msg.tokensIn != null && <span>in: {msg.tokensIn}</span>}
+            {msg.tokensOut != null && <span>out: {msg.tokensOut}</span>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── App shell ──
 
 function App() {
@@ -1127,7 +1480,7 @@ function App() {
         </div>
       </div>
       <div style={{ display: "flex", gap: 8, marginBottom: 20, borderBottom: "2px solid var(--border)" }}>
-        {["providers", "tiers", "stats"].map(key => (
+        {["providers", "playground", "tiers", "stats"].map(key => (
           <button
             key={key}
             onClick={() => setTab(key)}
@@ -1145,6 +1498,7 @@ function App() {
         ))}
       </div>
       {tab === "providers" && <Providers />}
+      {tab === "playground" && <Playground />}
       {tab === "tiers" && <Tiers />}
       {tab === "stats" && <Stats />}
     </div>

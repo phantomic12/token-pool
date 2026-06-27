@@ -64,6 +64,13 @@ export class UserService {
     return result.changes > 0;
   }
 
+  updatePassword(id: number, password: string): boolean {
+    const salt = bcrypt.genSaltSync(10);
+    const passwordHash = bcrypt.hashSync(password, salt);
+    const result = this.db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(passwordHash, id);
+    return result.changes > 0;
+  }
+
   delete(id: number): boolean {
     const result = this.db.prepare("DELETE FROM users WHERE id = ?").run(id);
     return result.changes > 0;

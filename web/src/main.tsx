@@ -1445,6 +1445,195 @@ function PlaygroundBubble({ msg }: { msg: PlaygroundMessage }) {
   );
 }
 
+// ── Users ──
+
+function Users() {
+  const [users, setUsers] = useState<any[]>([]);
+  const [showCreate, setShowCreate] = useState(false);
+  const [newUsername, setNewUsername] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [newRole, setNewRole] = useState<"admin" | "regular">("regular");
+  const [error, setError] = useState("");
+  const [pwModal, setPwModal] = useState<{ id: number; username: string } | null>(null);
+  const [pwValue, setPwValue] = useState("");
+  const [pwError, setPwError] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      setUsers(await api("/admin/users"));
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const createUser = async () => {
+    setError("");
+    if (!newUsername.trim() || !newPassword) { setError("Username and password required"); return; }
+    if (newPassword.length < 6) { setError("Password must be at least 6 characters"); return; }
+    try {
+      await api("/admin/users", {
+        method: "POST",
+        body: JSON.stringify({ username: newUsername.trim(), password: newPassword, role: newRole }),
+      });
+      setNewUsername(""); setNewPassword(""); setNewRole("regular"); setShowCreate(false);
+      await load();
+    } catch (e: any) {
+      setError(e.message || "Failed to create user");
+    }
+  };
+
+  const changeRole = async (id: number, role: "admin" | "regular") => {
+    try {
+      await api(`/admin/users/${id}/role`, { method: "PUT", body: JSON.stringify({ role }) });
+      await load();
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+
+  const deleteUser = async (id: number, username: string) => {
+    if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+    try {
+      await api(`/admin/users/${id}`, { method: "DELETE" });
+      await load();
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+
+  const submitPassword = async () => {
+    if (!pwModal) return;
+    setPwError("");
+    if (pwValue.length < 6) { setPwError("Password must be at least 6 characters"); return; }
+    try {
+      await api(`/admin/users/${pwModal.id}/password`, { method: "PUT", body: JSON.stringify({ password: pwValue }) });
+      setPwModal(null); setPwValue(""); setPwError("");
+    } catch (e: any) {
+      setPwError(e.message);
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+        <h2 style={{ margin: 0, color: "var(--text)" }}>Users ({users.length})</h2>
+        <button onClick={() => setShowCreate(!showCreate)} style={btnStyle}>+ Add User</button>
+      </div>
+
+      {error && <div style={{ color: "var(--danger)", fontSize: 13, marginBottom: 12 }}>{error}</div>}
+
+      {/* Create form */}
+      {showCreate && (
+        <div style={{ ...cardStyle, marginBottom: 16, display: "grid", gridTemplateColumns: "1fr 1fr auto auto", gap: 8, alignItems: "end" }}>
+          <div>
+            <label style={labelStyle}>Username</label>
+            <input value={newUsername} onChange={e => setNewUsername(e.target.value)} style={{ ...inputStyle, margin: 0 }} placeholder="username" />
+          </div>
+          <div>
+            <label style={labelStyle}>Password</label>
+            <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} style={{ ...inputStyle, margin: 0 }} placeholder="••••••" />
+          </div>
+          <div>
+            <label style={labelStyle}>Role</label>
+            <select value={newRole} onChange={e => setNewRole(e.target.value as any)} style={{ ...inputStyle, margin: 0, cursor: "pointer" }}>
+              <option value="regular">Regular</option>
+              <option value="admin">Admin</option>
+            </select>
+          </div>
+          <div style={{ display: "flex", gap: 4 }}>
+            <button onClick={createUser} style={btnStyle}>Create</button>
+            <button onClick={() => { setShowCreate(false); setError(""); }} style={smBtnStyle}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* User list */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {users.map(u => (
+          <div key={u.id} style={{ ...cardStyle, display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{
+              width: 36, height: 36, borderRadius: 8,
+              background: u.role === "admin" ? "var(--accent)" : "var(--badge-bg)",
+              color: u.role === "admin" ? "#fff" : "var(--text-secondary)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontWeight: 700, fontSize: 14, flexShrink: 0,
+            }}>
+              {u.username.charAt(0).toUpperCase()}
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, color: "var(--text)" }}>
+                {u.username}
+                {u.role === "admin" && (
+                  <span style={{ ...badgeStyle, marginLeft: 8, background: "rgba(66,133,244,0.15)", color: "var(--accent)" }}>admin</span>
+                )}
+              </div>
+              <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                ID: {u.id} · Created: {new Date(u.createdAt).toLocaleDateString()}
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+              <select
+                value={u.role}
+                onChange={e => changeRole(u.id, e.target.value as any)}
+                style={{ ...smBtnStyle, cursor: "pointer", padding: "4px 8px" }}
+              >
+                <option value="regular">Regular</option>
+                <option value="admin">Admin</option>
+              </select>
+              <button onClick={() => { setPwModal({ id: u.id, username: u.username }); setPwValue(""); setPwError(""); }} style={smBtnStyle}>
+                Set Password
+              </button>
+              <button
+                onClick={() => deleteUser(u.id, u.username)}
+                style={{ ...smBtnStyle, color: "var(--danger)" }}
+                disabled={u.username === "admin"}
+                title={u.username === "admin" ? "Cannot delete primary admin" : "Delete user"}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Password modal */}
+      {pwModal && (
+        <div
+          onClick={() => setPwModal(null)}
+          style={{
+            position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+            background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{ ...cardStyle, width: 360, padding: 24 }}
+          >
+            <h3 style={{ margin: "0 0 8px", color: "var(--text)" }}>Set Password</h3>
+            <div style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 12 }}>
+              Set new password for <strong>{pwModal.username}</strong>
+            </div>
+            <input
+              type="password"
+              value={pwValue}
+              onChange={e => setPwValue(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && submitPassword()}
+              placeholder="New password"
+              style={{ ...inputStyle, margin: "0 0 8px" }}
+              autoFocus
+            />
+            {pwError && <div style={{ color: "var(--danger)", fontSize: 13, marginBottom: 8 }}>{pwError}</div>}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button onClick={() => setPwModal(null)} style={smBtnStyle}>Cancel</button>
+              <button onClick={submitPassword} style={btnStyle}>Update</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── App shell ──
 
 function App() {
@@ -1480,7 +1669,7 @@ function App() {
         </div>
       </div>
       <div style={{ display: "flex", gap: 8, marginBottom: 20, borderBottom: "2px solid var(--border)" }}>
-        {["providers", "playground", "tiers", "stats"].map(key => (
+        {["providers", "playground", "tiers", "stats", "users"].map(key => (
           <button
             key={key}
             onClick={() => setTab(key)}
@@ -1501,6 +1690,7 @@ function App() {
       {tab === "playground" && <Playground />}
       {tab === "tiers" && <Tiers />}
       {tab === "stats" && <Stats />}
+      {tab === "users" && <Users />}
     </div>
   );
 }

@@ -814,6 +814,26 @@ export class TokenPoolServer {
       return ok ? reply.send({ ok }) : reply.code(404).send({ error: { message: "not found", type: "not_found", code: null } });
     });
 
+    this.fastify.put("/v1/admin/users/:id/password", adminGuard, async (request, reply) => {
+      const id = parseInt((request.params as any).id, 10);
+      const { password } = request.body as { password: string };
+      if (!password || password.length < 6) {
+        return reply.code(400).send({ error: { message: "password must be at least 6 characters", type: "invalid_request", code: null } });
+      }
+      const ok = this.users.updatePassword(id, password);
+      return ok ? reply.send({ ok }) : reply.code(404).send({ error: { message: "not found", type: "not_found", code: null } });
+    });
+
+    this.fastify.put("/v1/admin/users/:id/role", adminGuard, async (request, reply) => {
+      const id = parseInt((request.params as any).id, 10);
+      const { role } = request.body as { role: "admin" | "regular" };
+      if (!role || !["admin", "regular"].includes(role)) {
+        return reply.code(400).send({ error: { message: "role must be 'admin' or 'regular'", type: "invalid_request", code: null } });
+      }
+      const ok = this.users.updateRole(id, role);
+      return ok ? reply.send({ ok }) : reply.code(404).send({ error: { message: "not found", type: "not_found", code: null } });
+    });
+
     // ── OAuth ──
 
     // Start OAuth flow for a provider (routes based on flow type)

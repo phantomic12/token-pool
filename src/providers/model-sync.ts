@@ -1,5 +1,6 @@
 import { request } from "undici";
 import type { ProviderService } from "@/providers";
+import type { CryptoService } from "@/auth/crypto";
 import type { ModelMetadata } from "@/types";
 
 const MODELS_DEV_URL = "https://models.dev/api/models";
@@ -46,6 +47,7 @@ export class ModelMetadataSync {
 
   constructor(
     private providers: ProviderService,
+    private crypto: CryptoService,
     private refreshIntervalSec: number = 3600,
   ) {}
 
@@ -71,20 +73,104 @@ export class ModelMetadataSync {
    * Merge results into the model metadata cache.
    */
   async sync(): Promise<{ fetched: number; source: string }> {
+    let totalFetched = 0;
+    let source = "none";
+
+    // 1. Fetch from models.dev
     try {
       const count = await this.fetchFromModelsDev();
-      if (count > 0) return { fetched: count, source: "models.dev" };
+      if (count > 0) { totalFetched += count; source = "models.dev"; }
     } catch (err) {
       console.warn("[models-sync] models.dev fetch failed, trying OpenRouter:", err);
     }
 
-    try {
-      const count = await this.fetchFromOpenRouter();
-      return { fetched: count, source: "openrouter" };
-    } catch (err) {
-      console.error("[models-sync] all sources failed:", err);
-      return { fetched: 0, source: "none" };
+    // 2. Fetch from OpenRouter as fallback
+    if (totalFetched === 0) {
+      try {
+        const count = await this.fetchFromOpenRouter();
+        if (count > 0) { totalFetched += count; source = "openrouter"; }
+      } catch (err) {
+        console.error("[models-sync] OpenRouter fetch failed:", err);
+      }
     }
+
+    // 3. Fetch directly from each enabled provider's /models endpoint
+    // This catches providers not listed in models.dev/OpenRouter (e.g. umans, local providers)
+    try {
+      const directCount = await this.fetchFromProviders();
+      if (directCount > 0) {
+        totalFetched += directCount;
+        source = source === "none" ? "direct" : `${source}+direct`;
+      }
+    } catch (err) {
+      console.warn("[models-sync] direct provider fetch had errors:", err);
+    }
+
+    return { fetched: totalFetched, source };
+  }
+
+  /**
+   * Fetch models directly from each enabled provider's /v1/models or /models endpoint.
+   * Only fetches for providers that have 0 models after models.dev/OpenRouter sync.
+   */
+  private async fetchFromProviders(): Promise<number> {
+    const { request } = await import("undici");
+    const providers = this.providers.list().filter(p => p.enabled);
+    let count = 0;
+
+    await Promise.allSettled(providers.map(async (provider) => {
+      // Skip if provider already has models from models.dev/OpenRouter
+      const existing = this.providers.listModels(provider.id);
+      if (existing.length > 0) return;
+
+      // Need at least one key to authenticate (unless local)
+      const keys = this.providers.listKeys(provider.id).filter(k => k.enabled);
+      if (keys.length === 0 && provider.type !== "local") return;
+
+      try {
+        const url = `${provider.baseUrl.replace(/\/$/, "")}/models`;
+        const headers: Record<string, string> = { Accept: "application/json" };
+
+        // Use first available key for auth
+        if (keys.length > 0) {
+          const apiKey = this.crypto.decrypt(keys[0].apiKeyEnc);
+          if (provider.wireFormat === "anthropic") {
+            headers["x-api-key"] = apiKey;
+          } else if (provider.wireFormat === "google") {
+            headers["x-goog-api-key"] = apiKey;
+          } else {
+            headers["Authorization"] = `Bearer ${apiKey}`;
+          }
+        }
+
+        const resp = await request(url, { headers, method: "GET" });
+        if (resp.statusCode !== 200) return;
+
+        const body = await resp.body.json() as { data?: Array<{ id: string; context_length?: number }> } | Array<{ id: string; context_length?: number }>;
+        const models = Array.isArray(body) ? body : (body.data || []);
+
+        for (const m of models) {
+          if (!m.id) continue;
+          this.providers.upsertModel({
+            providerId: provider.id,
+            modelId: m.id,
+            name: m.id,
+            contextWindow: (m as any).context_length ?? (m as any).context_window ?? 0,
+            supportsVision: false,
+            supportsAudio: false,
+            supportsTools: false,
+            inputCostPerMtok: null,
+            outputCostPerMtok: null,
+            maxOutputTokens: (m as any).max_output_tokens ?? null,
+          });
+          count++;
+        }
+      } catch (err) {
+        // Provider endpoint not accessible — skip silently
+      }
+    }));
+
+    return count;
   }
 
   private async fetchFromModelsDev(): Promise<number> {

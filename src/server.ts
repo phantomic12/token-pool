@@ -54,7 +54,7 @@ export class TokenPoolServer {
     this.concurrencyGuard = new ConcurrencyGuard();
     this.fusion = new FusionService(this.db);
     this.fusionEngine = new FusionEngine(this.providers, this.proxy, this.crypto, this.guard, this.fusion);
-    this.modelSync = new ModelMetadataSync(this.providers, this.config.modelsRefreshIntervalSec);
+    this.modelSync = new ModelMetadataSync(this.providers, this.crypto, this.config.modelsRefreshIntervalSec);
     this.users = new UserService(this.db);
     this.usage = new UsageTracker(this.db);
     this.oauth = new OAuthService(this.db, this.crypto, this.providers);
@@ -460,6 +460,14 @@ export class TokenPoolServer {
     }
 
     try {
+      // ── Budget check ──
+      const budgetCheck = this.usage.checkBudget(provider.id);
+      if (budgetCheck.exceeded) {
+        return reply.code(429).send({
+          error: { message: budgetCheck.reason!, type: "budget_exceeded", code: null },
+        });
+      }
+
       const result = await this.proxy.forward(provider, resolved.modelId, body, resolved.key);
 
       if (result.status === 429) {
@@ -886,6 +894,72 @@ export class TokenPoolServer {
       const offset = parseInt(q?.offset ?? "0", 10);
       const providerId = q?.providerId ? parseInt(q.providerId, 10) : undefined;
       return this.usage.getLogs(limit, offset, providerId);
+    });
+
+    // ── Budget management ──
+    this.fastify.get("/v1/admin/budgets", adminGuard, async () => {
+      return this.usage.getAllBudgets();
+    });
+
+    this.fastify.get("/v1/admin/providers/:id/budget", adminGuard, async (request) => {
+      const id = parseInt((request.params as any).id, 10);
+      const budget = this.usage.getBudget(id);
+      if (!budget) return null;
+      const spend = this.usage.getProviderSpend(id);
+      return { ...budget, dailySpend: spend.dailySpend, monthlySpend: spend.monthlySpend };
+    });
+
+    this.fastify.put("/v1/admin/providers/:id/budget", adminGuard, async (request, reply) => {
+      const id = parseInt((request.params as any).id, 10);
+      const body = request.body as { dailyLimitUsd?: number | null; monthlyLimitUsd?: number | null; alertThresholdPct?: number };
+      this.usage.setBudget(id, body.dailyLimitUsd ?? null, body.monthlyLimitUsd ?? null, body.alertThresholdPct ?? 80);
+      return { ok: true };
+    });
+
+    this.fastify.delete("/v1/admin/providers/:id/budget", adminGuard, async (request, reply) => {
+      const id = parseInt((request.params as any).id, 10);
+      this.usage.deleteBudget(id);
+      return { ok: true };
+    });
+
+    // ── API Keys (virtual keys for external access) ──
+    this.fastify.get("/v1/admin/api-keys", adminGuard, async () => {
+      return this.db.prepare("SELECT id, label, user_id as userId, enabled, created_at as createdAt FROM api_keys ORDER BY id").all();
+    });
+
+    this.fastify.post("/v1/admin/api-keys", adminGuard, async (request, reply) => {
+      const { label } = request.body as { label?: string };
+      const rawKey = "tp-" + randomBytes(24).toString("hex");
+      const { createHash } = await import("crypto");
+      const keyHash = createHash("sha256").update(rawKey).digest("hex");
+      const result = this.db.prepare("INSERT INTO api_keys (key_hash, label) VALUES (?, ?)").run(keyHash, label ?? "");
+      return reply.code(201).send({ id: Number(result.lastInsertRowid), key: rawKey });
+    });
+
+    this.fastify.delete("/v1/admin/api-keys/:id", adminGuard, async (request, reply) => {
+      const id = parseInt((request.params as any).id, 10);
+      this.db.prepare("DELETE FROM api_keys WHERE id = ?").run(id);
+      return { ok: true };
+    });
+
+    this.fastify.put("/v1/admin/api-keys/:id/toggle", adminGuard, async (request, reply) => {
+      const id = parseInt((request.params as any).id, 10);
+      const row = this.db.prepare("SELECT enabled FROM api_keys WHERE id = ?").get(id) as { enabled: number } | undefined;
+      if (!row) return reply.code(404).send({ error: { message: "not found", type: "not_found", code: null } });
+      this.db.prepare("UPDATE api_keys SET enabled = ? WHERE id = ?").run(row.enabled ? 0 : 1, id);
+      return { ok: true, enabled: !row.enabled };
+    });
+
+    // ── Cache stats ──
+    this.fastify.get("/v1/admin/cache/stats", adminGuard, async () => {
+      const total = this.db.prepare("SELECT COUNT(*) as count, COALESCE(SUM(hit_count), 0) as hits, COALESCE(SUM(input_tokens), 0) as inputTokens, COALESCE(SUM(output_tokens), 0) as outputTokens FROM response_cache").get() as any;
+      const byModel = this.db.prepare("SELECT model_id as modelId, COUNT(*) as entries, SUM(hit_count) as hits FROM response_cache GROUP BY model_id ORDER BY hits DESC LIMIT 10").all();
+      return { total: total.count, totalHits: total.hits, totalInputTokens: total.inputTokens, totalOutputTokens: total.outputTokens, byModel };
+    });
+
+    this.fastify.delete("/v1/admin/cache", adminGuard, async () => {
+      this.db.prepare("DELETE FROM response_cache").run();
+      return { ok: true };
     });
 
     // User management (admin only)

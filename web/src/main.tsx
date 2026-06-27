@@ -536,6 +536,9 @@ function ProviderDetail({ provider, onBack, onSaved, keyCounts, oauthConnected }
   // Models list
   const [providerModels, setProviderModels] = useState<any[]>([]);
 
+  // Budget state
+  const [budget, setBudget] = useState<any>(null);
+
   // OAuth state
   const [oauthState, setOauthState] = useState<OAuthState | null>(null);
   const [oauthStatus, setOauthStatus] = useState<string>("");
@@ -560,9 +563,19 @@ function ProviderDetail({ provider, onBack, onSaved, keyCounts, oauthConnected }
     } catch { setProviderModels([]); }
   }, [isCreate, provider]);
 
+  // Load budget
+  const loadBudget = useCallback(async () => {
+    if (isCreate || !provider) return;
+    try {
+      const b = await api(`/admin/providers/${provider.id}/budget`);
+      setBudget(b);
+    } catch { setBudget(null); }
+  }, [isCreate, provider]);
+
   useEffect(() => {
     loadKeys();
     loadModels();
+    loadBudget();
     return () => { if (pollRef.current) clearTimeout(pollRef.current); };
   }, [loadKeys]);
 
@@ -968,6 +981,14 @@ function ProviderDetail({ provider, onBack, onSaved, keyCounts, oauthConnected }
         </div>
       </div>
 
+      {/* Budget section */}
+      {!isCreate && (
+        <div style={sectionCard}>
+          <h3 style={sectionTitle}>Budget & Spend</h3>
+          <BudgetSection providerId={provider.id} budget={budget} onSaved={loadBudget} />
+        </div>
+      )}
+
       {/* Available models */}
       {!isCreate && (
         <div style={sectionCard}>
@@ -1021,6 +1042,196 @@ function ProviderDetail({ provider, onBack, onSaved, keyCounts, oauthConnected }
           >
             Delete Provider
           </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Budget Section (inside ProviderDetail) ──
+
+function BudgetSection({ providerId, budget, onSaved }: { providerId: number; budget: any; onSaved: () => void }) {
+  const [dailyLimit, setDailyLimit] = useState("");
+  const [monthlyLimit, setMonthlyLimit] = useState("");
+  const [alertPct, setAlertPct] = useState("80");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (budget) {
+      setDailyLimit(budget.dailyLimitUsd != null ? String(budget.dailyLimitUsd) : "");
+      setMonthlyLimit(budget.monthlyLimitUsd != null ? String(budget.monthlyLimitUsd) : "");
+      setAlertPct(String(budget.alertThresholdPct ?? 80));
+    }
+  }, [budget]);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api(`/admin/providers/${providerId}/budget`, {
+        method: "PUT",
+        body: JSON.stringify({
+          dailyLimitUsd: dailyLimit ? parseFloat(dailyLimit) : null,
+          monthlyLimitUsd: monthlyLimit ? parseFloat(monthlyLimit) : null,
+          alertThresholdPct: parseInt(alertPct) || 80,
+        }),
+      });
+      onSaved();
+    } catch (e: any) {
+      alert(`Failed: ${e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!confirm("Remove budget for this provider?")) return;
+    try {
+      await api(`/admin/providers/${providerId}/budget`, { method: "DELETE" });
+      setDailyLimit(""); setMonthlyLimit("");
+      onSaved();
+    } catch (e: any) {
+      alert(`Failed: ${e.message}`);
+    }
+  };
+
+  const dailySpend = budget?.dailySpend ?? 0;
+  const monthlySpend = budget?.monthlySpend ?? 0;
+  const dailyPct = dailyLimit && parseFloat(dailyLimit) > 0 ? Math.min(100, (dailySpend / parseFloat(dailyLimit)) * 100) : 0;
+  const monthlyPct = monthlyLimit && parseFloat(monthlyLimit) > 0 ? Math.min(100, (monthlySpend / parseFloat(monthlyLimit)) * 100) : 0;
+  const barColor = (pct: number, threshold: number) => pct > 100 ? "var(--danger)" : pct > threshold ? "#fa0" : "var(--success)";
+
+  return (
+    <div>
+      {/* Spend bars */}
+      {(dailyLimit || monthlyLimit) && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+          {dailyLimit && (
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--text-secondary)", marginBottom: 2 }}>
+                <span>Today</span><span>${dailySpend.toFixed(4)} / ${parseFloat(dailyLimit).toFixed(2)}</span>
+              </div>
+              <div style={{ height: 6, borderRadius: 3, background: "var(--badge-bg)", overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${dailyPct}%`, background: barColor(dailyPct, parseInt(alertPct)), borderRadius: 3 }} />
+              </div>
+            </div>
+          )}
+          {monthlyLimit && (
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--text-secondary)", marginBottom: 2 }}>
+                <span>This Month</span><span>${monthlySpend.toFixed(4)} / ${parseFloat(monthlyLimit).toFixed(2)}</span>
+              </div>
+              <div style={{ height: 6, borderRadius: 3, background: "var(--badge-bg)", overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${monthlyPct}%`, background: barColor(monthlyPct, parseInt(alertPct)), borderRadius: 3 }} />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, alignItems: "end" }}>
+        <div>
+          <label style={labelStyle}>Daily Limit ($)</label>
+          <input type="number" step="0.01" placeholder="—" value={dailyLimit} onChange={e => setDailyLimit(e.target.value)} style={{ ...inputStyle, margin: 0 }} />
+        </div>
+        <div>
+          <label style={labelStyle}>Monthly Limit ($)</label>
+          <input type="number" step="0.01" placeholder="—" value={monthlyLimit} onChange={e => setMonthlyLimit(e.target.value)} style={{ ...inputStyle, margin: 0 }} />
+        </div>
+        <div>
+          <label style={labelStyle}>Alert %</label>
+          <input type="number" min="1" max="100" value={alertPct} onChange={e => setAlertPct(e.target.value)} style={{ ...inputStyle, margin: 0, width: 60 }} />
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+        <button onClick={save} disabled={saving} style={{ ...btnStyle, opacity: saving ? 0.6 : 1 }}>
+          {saving ? "Saving..." : "Save Budget"}
+        </button>
+        {(dailyLimit || monthlyLimit) && (
+          <button onClick={remove} style={{ ...smBtnStyle, color: "var(--danger)" }}>Remove</button>
+        )}
+      </div>
+      <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4 }}>
+        Requests will be rejected with 429 when budget is exceeded.
+      </div>
+    </div>
+  );
+}
+
+// ── API Keys ──
+
+function ApiKeys() {
+  const [keys, setKeys] = useState<any[]>([]);
+  const [newLabel, setNewLabel] = useState("");
+  const [createdKey, setCreatedKey] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try { setKeys(await api("/admin/api-keys")); } catch {}
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const createKey = async () => {
+    try {
+      const result = await api("/admin/api-keys", { method: "POST", body: JSON.stringify({ label: newLabel || "default" }) });
+      setCreatedKey(result.key);
+      setNewLabel("");
+      await load();
+    } catch (e: any) { alert(`Failed: ${e.message}`); }
+  };
+
+  const toggleKey = async (id: number) => {
+    try { await api(`/admin/api-keys/${id}/toggle`, { method: "PUT" }); await load(); } catch {}
+  };
+
+  const deleteKey = async (id: number) => {
+    if (!confirm("Delete this API key?")) return;
+    try { await api(`/admin/api-keys/${id}`, { method: "DELETE" }); await load(); } catch {}
+  };
+
+  return (
+    <div>
+      <h2 style={{ margin: "0 0 16px", color: "var(--text)" }}>API Keys</h2>
+      <div style={{ ...cardStyle, marginBottom: 16 }}>
+        <div style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 12 }}>
+          Generate API keys for external clients to access token-pool's OpenAI-compatible endpoint.
+          Use <code style={{ background: "var(--badge-bg)", padding: "2px 4px", borderRadius: 3 }}>Authorization: Bearer tp-...</code>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input placeholder="Label (optional)" value={newLabel} onChange={e => setNewLabel(e.target.value)} style={{ ...inputStyle, margin: 0, flex: 1 }} />
+          <button onClick={createKey} style={btnStyle}>+ Generate Key</button>
+        </div>
+      </div>
+
+      {createdKey && (
+        <div style={{ ...cardStyle, marginBottom: 16, borderColor: "var(--success)", borderWidth: 2 }}>
+          <div style={{ fontWeight: 600, color: "var(--success)", marginBottom: 8 }}>✓ Key Created — Copy Now (shown only once)</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input readOnly value={createdKey} style={{ ...inputStyle, margin: 0, flex: 1, fontFamily: "monospace", fontSize: 12 }} onClick={e => (e.target as HTMLInputElement).select()} />
+            <button onClick={() => { navigator.clipboard.writeText(createdKey); }} style={btnStyle}>Copy</button>
+          </div>
+        </div>
+      )}
+
+      {keys.length === 0 ? (
+        <div style={{ textAlign: "center", color: "var(--text-secondary)", padding: 40 }}>
+          <div style={{ fontSize: 32, marginBottom: 8 }}>🔑</div>
+          No API keys yet
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {keys.map(k => (
+            <div key={k.id} style={{ ...cardStyle, display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ width: 32, height: 32, borderRadius: 8, background: k.enabled ? "var(--accent)" : "var(--badge-bg)", color: k.enabled ? "#fff" : "var(--text-secondary)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, flexShrink: 0 }}>🔑</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, color: "var(--text)" }}>{k.label || "unlabeled"}</div>
+                <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>ID: {k.id} · Created: {new Date(k.createdAt).toLocaleDateString()}</div>
+              </div>
+              <button onClick={() => toggleKey(k.id)} style={{ ...smBtnStyle, background: k.enabled ? "var(--success)" : "var(--badge-bg)", color: k.enabled ? "#fff" : "var(--text-secondary)" }}>
+                {k.enabled ? "● Active" : "○ Disabled"}
+              </button>
+              <button onClick={() => deleteKey(k.id)} style={{ ...smBtnStyle, color: "var(--danger)" }}>Delete</button>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -1231,6 +1442,49 @@ function DimensionTable({ stats }: { stats: any }) {
   );
 }
 
+function CacheStatsCard() {
+  const [cacheStats, setCacheStats] = useState<any>(null);
+
+  const load = useCallback(async () => {
+    try { setCacheStats(await api("/admin/cache/stats")); } catch {}
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (!cacheStats) return null;
+
+  const clearCache = async () => {
+    if (!confirm("Clear all cached responses?")) return;
+    try { await api("/admin/cache", { method: "DELETE" }); await load(); } catch {}
+  };
+
+  return (
+    <div style={{ ...cardStyle, marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <h3 style={{ margin: 0, color: "var(--text)" }}>Response Cache</h3>
+        <button onClick={clearCache} style={smBtnStyle}>Clear Cache</button>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12 }}>
+        <StatCard title="Cached Responses" value={String(cacheStats.total || 0)} color="#8884d8" />
+        <StatCard title="Cache Hits" value={String(cacheStats.totalHits || 0)} color="#2d5" />
+        <StatCard title="Tokens Saved (in)" value={(cacheStats.totalInputTokens || 0).toLocaleString()} color="#fa0" />
+        <StatCard title="Tokens Saved (out)" value={(cacheStats.totalOutputTokens || 0).toLocaleString()} color="#a8328a" />
+      </div>
+      {cacheStats.byModel && cacheStats.byModel.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 4 }}>By Model:</div>
+          {cacheStats.byModel.map((m: any, i: number) => (
+            <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "2px 0" }}>
+              <span style={{ fontFamily: "monospace", color: "var(--text)" }}>{m.modelId}</span>
+              <span style={{ color: "var(--text-secondary)" }}>{m.entries} entries · {m.hits} hits</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Stats() {
   const [stats, setStats] = useState<any>(null);
   const [days, setDays] = useState(30);
@@ -1392,6 +1646,9 @@ function Stats() {
           </ResponsiveContainer>
         </div>
       </div>
+
+      {/* Cache stats */}
+      <CacheStatsCard />
 
       <div style={{ marginTop: 8 }}>
         <a href={`/v1/admin/stats/export?days=${days}`} target="_blank">
@@ -1576,7 +1833,7 @@ function Playground() {
       (latency, tokensIn, tokensOut, resolvedModel) => {
         setMessages(prev => {
           const copy = [...prev];
-          copy[copy.length - 1] = { ...copy[copy.length - 1], latencyMs: latency, tokensIn, tokensOut, model: resolvedModel || model };
+          copy[copy.length - 1] = { ...copy[copy.length - 1], latencyMs: latency, tokensIn, tokensOut, model: resolvedModel || selectedModel };
           return copy;
         });
       },
@@ -1689,7 +1946,7 @@ function Playground() {
       (latency, tokensIn, tokensOut, resolvedModel) => {
         setMessages(prev => {
           const copy = [...prev];
-          copy[idx] = { ...copy[idx], latencyMs: latency, tokensIn, tokensOut, model: resolvedModel || model };
+          copy[idx] = { ...copy[idx], latencyMs: latency, tokensIn, tokensOut, model: resolvedModel || selectedModel };
           return copy;
         });
       },
@@ -1739,7 +1996,7 @@ function Playground() {
       (latency, tokensIn, tokensOut, resolvedModel) => {
         setMessages(prev => {
           const copy = [...prev];
-          copy[copy.length - 1] = { ...copy[copy.length - 1], latencyMs: latency, tokensIn, tokensOut, model: resolvedModel || model };
+          copy[copy.length - 1] = { ...copy[copy.length - 1], latencyMs: latency, tokensIn, tokensOut, model: resolvedModel || selectedModel };
           return copy;
         });
       },
@@ -2442,6 +2699,7 @@ function App() {
     { key: "tiers", icon: "📊", label: "Tiers" },
     { key: "stats", icon: "📈", label: "Stats" },
     { key: "logs", icon: "📋", label: "Logs" },
+    { key: "keys", icon: "🔑", label: "API Keys" },
     { key: "users", icon: "👤", label: "Users" },
   ];
 
@@ -2492,6 +2750,7 @@ function App() {
         {tab === "tiers" && <Tiers />}
         {tab === "stats" && <Stats />}
         {tab === "logs" && <Logs />}
+        {tab === "keys" && <ApiKeys />}
         {tab === "users" && <Users />}
       </div>
     </div>

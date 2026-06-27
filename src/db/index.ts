@@ -127,6 +127,36 @@ CREATE TABLE IF NOT EXISTS routing_profiles (
   is_default INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS budgets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+  daily_limit_usd REAL,
+  monthly_limit_usd REAL,
+  alert_threshold_pct INTEGER DEFAULT 80,
+  UNIQUE(provider_id)
+);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key_hash TEXT UNIQUE NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  user_id INTEGER REFERENCES users(id),
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS response_cache (
+  cache_key TEXT PRIMARY KEY,
+  response_body TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  provider_id INTEGER,
+  input_tokens INTEGER DEFAULT 0,
+  output_tokens INTEGER DEFAULT 0,
+  hit_count INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_accessed TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `;
 
 const SEED_TIERS = [

@@ -151,4 +151,88 @@ export class UsageTracker {
 
     return { logs: rows, total: countRow.total };
   }
+
+  /**
+   * Get budget for a provider.
+   */
+  getBudget(providerId: number): { dailyLimitUsd: number | null; monthlyLimitUsd: number | null; alertThresholdPct: number } | null {
+    const row = this.db.prepare("SELECT * FROM budgets WHERE provider_id = ?").get(providerId) as any;
+    if (!row) return null;
+    return {
+      dailyLimitUsd: row.daily_limit_usd,
+      monthlyLimitUsd: row.monthly_limit_usd,
+      alertThresholdPct: row.alert_threshold_pct ?? 80,
+    };
+  }
+
+  /**
+   * Set budget for a provider.
+   */
+  setBudget(providerId: number, dailyLimitUsd: number | null, monthlyLimitUsd: number | null, alertThresholdPct: number = 80): void {
+    this.db.prepare(
+      `INSERT INTO budgets (provider_id, daily_limit_usd, monthly_limit_usd, alert_threshold_pct)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(provider_id) DO UPDATE SET
+         daily_limit_usd = ?, monthly_limit_usd = ?, alert_threshold_pct = ?`
+    ).run(providerId, dailyLimitUsd, monthlyLimitUsd, alertThresholdPct, dailyLimitUsd, monthlyLimitUsd, alertThresholdPct);
+  }
+
+  deleteBudget(providerId: number): void {
+    this.db.prepare("DELETE FROM budgets WHERE provider_id = ?").run(providerId);
+  }
+
+  /**
+   * Get spend for a provider today and this month.
+   */
+  getProviderSpend(providerId: number): { dailySpend: number; monthlySpend: number } {
+    const dayStart = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()).toISOString();
+    const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
+
+    const daily = this.db.prepare(
+      "SELECT COALESCE(SUM(cost_usd), 0) as spend FROM usage_events WHERE provider_id = ? AND timestamp >= ?"
+    ).get(providerId, dayStart) as { spend: number };
+
+    const monthly = this.db.prepare(
+      "SELECT COALESCE(SUM(cost_usd), 0) as spend FROM usage_events WHERE provider_id = ? AND timestamp >= ?"
+    ).get(providerId, monthStart) as { spend: number };
+
+    return { dailySpend: daily.spend, monthlySpend: monthly.spend };
+  }
+
+  /**
+   * Check if provider has exceeded budget. Returns { exceeded, reason }.
+   */
+  checkBudget(providerId: number): { exceeded: boolean; reason?: string; dailySpend?: number | null; dailyLimit?: number | null; monthlySpend?: number | null; monthlyLimit?: number | null } {
+    const budget = this.getBudget(providerId);
+    if (!budget) return { exceeded: false };
+
+    const spend = this.getProviderSpend(providerId);
+
+    if (budget.dailyLimitUsd != null && spend.dailySpend >= budget.dailyLimitUsd) {
+      return { exceeded: true, reason: `Daily budget exceeded ($${spend.dailySpend.toFixed(2)} / $${budget.dailyLimitUsd.toFixed(2)})`, dailySpend: spend.dailySpend, dailyLimit: budget.dailyLimitUsd, monthlySpend: spend.monthlySpend, monthlyLimit: budget.monthlyLimitUsd } as any;
+    }
+    if (budget.monthlyLimitUsd != null && spend.monthlySpend >= budget.monthlyLimitUsd) {
+      return { exceeded: true, reason: `Monthly budget exceeded ($${spend.monthlySpend.toFixed(2)} / $${budget.monthlyLimitUsd.toFixed(2)})`, dailySpend: spend.dailySpend, dailyLimit: budget.dailyLimitUsd, monthlySpend: spend.monthlySpend, monthlyLimit: budget.monthlyLimitUsd } as any;
+    }
+
+    return { exceeded: false, dailySpend: spend.dailySpend, dailyLimit: budget.dailyLimitUsd, monthlySpend: spend.monthlySpend, monthlyLimit: budget.monthlyLimitUsd };
+  }
+
+  /**
+   * Get all budgets with spend for dashboard.
+   */
+  getAllBudgets(): Array<{ providerId: number; dailyLimitUsd: number | null; monthlyLimitUsd: number | null; alertThresholdPct: number; dailySpend: number; monthlySpend: number }> {
+    const budgets = this.db.prepare("SELECT * FROM budgets").all() as any[];
+    return budgets.map((b: any) => {
+      const spend = this.getProviderSpend(b.provider_id);
+      return {
+        providerId: b.provider_id,
+        dailyLimitUsd: b.daily_limit_usd,
+        monthlyLimitUsd: b.monthly_limit_usd,
+        alertThresholdPct: b.alert_threshold_pct ?? 80,
+        dailySpend: spend.dailySpend,
+        monthlySpend: spend.monthlySpend,
+      };
+    });
+  }
 }

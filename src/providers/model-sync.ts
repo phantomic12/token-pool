@@ -123,9 +123,13 @@ export class ModelMetadataSync {
       const existing = this.providers.listModels(provider.id);
       if (existing.length > 0) return;
 
-      // Need at least one key to authenticate (unless local)
+      // Skip providers with no base URL (auto-created by models.dev sync)
+      if (!provider.baseUrl) return;
+
+      // Need at least one key to authenticate (unless local or provider with public model list)
       const keys = this.providers.listKeys(provider.id).filter(k => k.enabled);
-      if (keys.length === 0 && provider.type !== "local") return;
+      // Try fetching even without keys — many providers have public /models endpoints
+      // (e.g. umans returns model list without auth)
 
       try {
         const url = `${provider.baseUrl.replace(/\/$/, "")}/models`;
@@ -146,22 +150,23 @@ export class ModelMetadataSync {
         const resp = await request(url, { headers, method: "GET" });
         if (resp.statusCode !== 200) return;
 
-        const body = await resp.body.json() as { data?: Array<{ id: string; context_length?: number }> } | Array<{ id: string; context_length?: number }>;
+        const body = await resp.body.json() as { data?: Array<any> } | Array<any>;
         const models = Array.isArray(body) ? body : (body.data || []);
 
         for (const m of models) {
           if (!m.id) continue;
+          const pricing = m.pricing || {};
           this.providers.upsertModel({
             providerId: provider.id,
             modelId: m.id,
             name: m.id,
-            contextWindow: (m as any).context_length ?? (m as any).context_window ?? 0,
+            contextWindow: m.context_length ?? m.context_window ?? 0,
             supportsVision: false,
             supportsAudio: false,
             supportsTools: false,
-            inputCostPerMtok: null,
-            outputCostPerMtok: null,
-            maxOutputTokens: (m as any).max_output_tokens ?? null,
+            inputCostPerMtok: pricing.input != null ? Number(pricing.input) : null,
+            outputCostPerMtok: pricing.output != null ? Number(pricing.output) : null,
+            maxOutputTokens: m.max_output_tokens ?? null,
           });
           count++;
         }
